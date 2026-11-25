@@ -1,2 +1,4 @@
-# Agregar aqui dependencias de interfaz si se utiliza PyGame (ej. pygame>=2.6.0).
+# Interfaz grafica (PyGame). Se usa pygame-ce porque pygame 2.6.1 no tiene
+# instalador para Python 3.14. Se importa igual: import pygame
 # No se permiten bibliotecas que implementen directamente A*, Minimax o logica proposicional.
+pygame-ce>=2.5.6
