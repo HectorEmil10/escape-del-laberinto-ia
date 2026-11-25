@@ -6,7 +6,7 @@ from nucleo.motor import MotorJuego
 # Cuando integres los módulos del equipo, descomenta estas importaciones:
 # from agentes.nivel1_astar import AgenteAStar
 # from agentes.nivel2_alfabeta import AgenteAlfaBeta
-# from agentes.nivel3_guardian import AgenteGuardian
+from agentes.nivel3_guardian import AgenteGuardian
 
 
 def construir_motor() -> MotorJuego:
