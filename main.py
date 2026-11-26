@@ -28,11 +28,23 @@ def construir_motor() -> MotorJuego:
     return MotorJuego(niveles)
 
 
+
 def main() -> None:
     motor = construir_motor()
     if "--consola" in sys.argv:
         ejecutar_en_consola(motor)
     else:
+        # Cargar PyGame únicamente al seleccionar la interfaz gráfica
+        # asi, el modo --consola no necesita tener PyGame instalado
+        try:
+            from interfaz.pygame_moria import ejecutar_en_pygame
+        except ModuleNotFoundError as error:
+            if error.name == "pygame":
+                raise SystemExit(
+                    "Falta PyGame. Instálalo con: py -m pip install -r requirements.txt "
+                    "o ejecuta el juego en consola con: py main.py --consola"
+                ) from error
+            raise
         ejecutar_en_pygame(motor)
 
 
