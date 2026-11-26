@@ -3,15 +3,22 @@
 Usa el motor del juego (nucleo/): no tiene reglas propias, solo lee el estado
 del MotorJuego y envía las acciones del jugador. Sirve para los 3 niveles.
 
-Todo el arte se dibuja por código (sin imágenes externas):
+El tablero se dibuja por código y admite sprites PNG opcionales:
   #  muro de piedra       .  piso de losas       E  puerta con luz
-  P  explorador con antorcha                      G  trasgo (agente)
+  P  Gandalf (mago)                               G  Balrog (agente)
+Los sprites son visuales: P/G siguen indicando posiciones del motor.
+Los finales de derrota y victoria usan escenas pixel art opcionales.
+El lienzo se adapta a la ventana; las letras se rasterizan a tamaño real
+para que no se borren al escalar.
 
 Ejecutar desde la raíz del repo:  py main.py
+La interfaz cambia de distribución según el ancho disponible: panel lateral
+para ventanas anchas y panel inferior para ventanas estrechas.
 """
 
 import math
 import random
+from pathlib import Path
 
 import pygame
 
@@ -24,6 +31,9 @@ MARGEN_X = 40
 TOP = 110
 ANCHO = MARGEN_X * 2 + CELDA * TAM
 ALTO = TOP + CELDA * TAM + 175
+# Dos lienzos lógicos; el mapa conserva siempre las mismas coordenadas.
+ANCHO_LATERAL = 1005
+ALTO_LATERAL = 710
 
 FONDO = (14, 12, 10)
 ORO = (214, 176, 86)
@@ -58,11 +68,34 @@ class Interfaz:
     def __init__(self):
         pygame.init()
         pygame.display.set_caption("Escape del laberinto - Las minas de Moria")
-        self.pantalla = pygame.display.set_mode((ANCHO, ALTO))
+        # Seleccionamos primero la distribución que mejor aprovecha el escritorio.
+        # Los tamaños de los elementos del laberinto no cambian: se escala el lienzo
+        # completo al final, conservando las proporciones.
+        info = pygame.display.Info()
+        escritorio_w, escritorio_h = info.current_w, info.current_h
+        espacio_w = max(1, int(escritorio_w * 0.90))
+        espacio_h = max(1, int(escritorio_h * 0.84))
+        usar_lateral = escritorio_w >= 980 and escritorio_w / max(1, escritorio_h) >= 1.28
+        base_w, base_h = (ANCHO_LATERAL, ALTO_LATERAL) if usar_lateral else (ANCHO, ALTO)
+        factor = min(1.0, espacio_w / base_w, espacio_h / base_h)
+        tam_ventana = (max(1, int(base_w * factor)), max(1, int(base_h * factor)))
+        self.ventana = pygame.display.set_mode(tam_ventana, pygame.RESIZABLE)
+        self.modo_panel = "lateral" if usar_lateral else "inferior"
+        self.ancho_logico, self.alto_logico = base_w, base_h
+        self.pantalla = pygame.Surface((base_w, base_h)).convert()
         self.f_titulo = pygame.font.SysFont("georgia", 34, bold=True)
         self.f_texto = pygame.font.SysFont("georgia", 20, bold=True)
         self.f_peq = pygame.font.SysFont("georgia", 15, bold=True)
         self.luz_activa = True
+        self.sprite_jugador = self._cargar_sprite_jugador()
+        self.sprite_agente = self._cargar_sprite_agente()
+        self.escena_derrota = self._cargar_escena_final("derrota.png")
+        self.escena_victoria = self._cargar_escena_final("victoria.png")
+        self._mostrar_final = False
+        # El juego sigue usando un lienzo lógico para el tablero, pero el texto
+        # se pinta después directamente sobre la ventana a su resolución real.
+        self._textos_pendientes = []
+        self._fuentes_resolucion = {}
 
         self._clave = None
         self.fondo = None
@@ -75,6 +108,21 @@ class Interfaz:
         self.brillo_jugador = _brillo(150, (70, 38, 10))
         self.brillo_salida = _brillo(90, (90, 66, 20))
         self.brillo_antorcha = _brillo(56, (60, 32, 8))
+
+    def _actualizar_disposicion(self):
+        """Cambia el panel de lado a abajo al estrechar la ventana y viceversa."""
+        self.ventana = pygame.display.get_surface()
+        w, h = self.ventana.get_size()
+        # Umbral de ancho y proporción: evita un panel lateral diminuto.
+        lateral = w >= 720 and w / max(h, 1) >= 1.23
+        nuevo = "lateral" if lateral else "inferior"
+        if nuevo == self.modo_panel:
+            return
+        self.modo_panel = nuevo
+        self.ancho_logico, self.alto_logico = ((ANCHO_LATERAL, ALTO_LATERAL)
+                                                if lateral else (ANCHO, ALTO))
+        self.pantalla = pygame.Surface((self.ancho_logico, self.alto_logico)).convert()
+        self._clave = None  # reconstruir fondo para el nuevo lienzo
 
     # ---- coordenadas: (1,1) abajo a la izquierda ---------------------
     def rect(self, celda):
@@ -135,10 +183,10 @@ class Interfaz:
         pygame.draw.rect(s, (96, 88, 74), marco.inflate(8, 0), 2)
 
     def _construir_fondo(self, lab):
-        s = pygame.Surface((ANCHO, ALTO))
-        for y in range(ALTO):  # fondo con degradado vertical
-            k = 1 - 0.5 * y / ALTO
-            pygame.draw.line(s, (int(22 * k), int(19 * k), int(16 * k)), (0, y), (ANCHO, y))
+        s = pygame.Surface((self.ancho_logico, self.alto_logico))
+        for y in range(self.alto_logico):  # fondo con degradado vertical
+            k = 1 - 0.5 * y / self.alto_logico
+            pygame.draw.line(s, (int(22 * k), int(19 * k), int(16 * k)), (0, y), (self.ancho_logico, y))
 
         tablero = pygame.Rect(MARGEN_X, TOP, CELDA * TAM, CELDA * TAM)
         s.set_clip(tablero)
@@ -168,11 +216,85 @@ class Interfaz:
         pygame.draw.rect(s, (28, 25, 21), tablero.inflate(26, 26), 2)
         pygame.draw.rect(s, ORO_OSC, tablero.inflate(2, 2), 2)
 
-        # título
-        for dx, dy, col in ((2, 2, (0, 0, 0)), (0, 0, ORO)):
-            img = self.f_titulo.render("LAS MINAS DE MORIA", True, col)
-            s.blit(img, img.get_rect(center=(ANCHO // 2 + dx, 34 + dy)))
+        # El título se pinta en cada fotograma directamente a la resolución
+        # real de la ventana (no queda almacenado borroso en este fondo).
         return s
+
+    @staticmethod
+    def _cargar_escena_final(nombre):
+        """Arte opcional para las pantallas de derrota y victoria."""
+        ruta = Path(__file__).resolve().parent.parent / "assets" / "finales" / nombre
+        try:
+            return pygame.image.load(str(ruta)).convert()
+        except (OSError, pygame.error):
+            return None
+
+    @staticmethod
+    def _dibujar_arte_escena(destino, imagen, area, recortar=False):
+        """Muestra el arte sin deformarlo ni tapar los controles."""
+        iw, ih = imagen.get_size()
+        if recortar:
+            factor = max(area.width / iw, area.height / ih)
+        else:
+            factor = min(area.width / iw, area.height / ih)
+        dw, dh = max(1, round(iw * factor)), max(1, round(ih * factor))
+        arte = pygame.transform.scale(imagen, (dw, dh))  # píxeles nítidos (pixel art)
+        rect = arte.get_rect(center=area.center)
+        anterior = destino.get_clip()
+        destino.set_clip(area)
+        destino.blit(arte, rect)
+        destino.set_clip(anterior)
+
+    def _pantalla_cinematografica(self, motor, resultado):
+        """Presenta los finales pixel art sin alterar el estado del motor.
+
+        Se utilizan imágenes sin botones, así los controles siguen siendo
+        texto real del juego, no zonas clicables ficticias. Escala con aspecto
+        preservado en ventanas anchas o estrechas.
+        """
+        p = self.pantalla
+        w, h = self.ancho_logico, self.alto_logico
+        p.fill(FONDO)
+        perdio = resultado == ResultadoNivel.CAPTURA_AGENTE
+        final_juego = (motor.indice_nivel + 1) == motor.total_niveles
+        escena = self.escena_derrota if perdio else self.escena_victoria
+
+        if escena is not None:
+            # Fondo tenue para rellenar las franjas si cambia la proporción.
+            # La ilustración principal nunca se deforma ni se recorta.
+            fondo_tenue = pygame.transform.scale(escena, (w, h))
+            fondo_tenue.set_alpha(55)
+            p.blit(fondo_tenue, (0, 0))
+            area_arte = pygame.Rect(15, 18, w - 30, max(1, h - 144))
+            self._dibujar_arte_escena(p, escena, area_arte, recortar=False)
+        else:
+            # Respaldo en caso de que no se hayan copiado los PNG.
+            pygame.draw.rect(p, (37, 28, 23),
+                             pygame.Rect(15, 18, w - 30, h - 144))
+            texto = "GAME OVER" if perdio else "¡NO PASARÁS!"
+            self._texto(self.f_titulo, texto, ORO,
+                        centro=(w // 2, h // 2 - 60))
+
+        # Barra de controles real: permanece legible en las dos disposiciones.
+        barra = pygame.Rect(12, h - 119, w - 24, 106)
+        pygame.draw.rect(p, (18, 14, 12), barra, border_radius=8)
+        pygame.draw.rect(p, ORO_OSC, barra, 2, border_radius=8)
+
+        if perdio:
+            estado_texto = f"Nivel {motor.nivel_actual} · Has sido capturado"
+            controles = "R: reintentar nivel    |    Esc: salir"
+        elif final_juego:
+            estado_texto = "¡Has superado los tres niveles!"
+            controles = "R: repetir último nivel    |    Esc: salir"
+        else:
+            estado_texto = f"Nivel {motor.nivel_actual} superado"
+            controles = "Enter: siguiente nivel    |    R: reintentar    |    Esc: salir"
+        self._texto(self.f_texto, estado_texto, PERGAMINO,
+                    centro=(w // 2, h - 91))
+        self._texto(self.f_peq, controles, ORO,
+                    centro=(w // 2, h - 57))
+        self._texto(self.f_peq, "LAS MINAS DE MORIA", ORO_OSC,
+                    centro=(w // 2, h - 29))
 
     # ---- personajes --------------------------------------------------
     @staticmethod
@@ -182,6 +304,46 @@ class Interfaz:
         w = 5 * escala
         pygame.draw.polygon(p, (255, 140, 30), [(x - w, y), (x, y - h), (x + w, y), (x, y + 3 * escala)])
         pygame.draw.polygon(p, (255, 220, 110), [(x - w / 2, y), (x, y - h * 0.6), (x + w / 2, y), (x, y + 2 * escala)])
+
+    @staticmethod
+    def _cargar_sprite_jugador():
+        """Carga el sprite desde la raíz del repositorio; no depende del cwd.
+
+        Si falta el archivo o PyGame no puede leerlo, se usa el dibujo
+        original del explorador para que el juego siga funcionando.
+        """
+        ruta = Path(__file__).resolve().parent.parent / "assets" / "personajes" / "gandalf.png"
+        try:
+            sprite = pygame.image.load(str(ruta)).convert_alpha()
+            return pygame.transform.smoothscale(sprite, (58, 58))
+        except (OSError, pygame.error):
+            return None
+
+    @staticmethod
+    def _cargar_sprite_agente():
+        """Balrog opcional; si falta el recurso se conserva el trasgo original."""
+        ruta = Path(__file__).resolve().parent.parent / "assets" / "personajes" / "balrog.png"
+        try:
+            sprite = pygame.image.load(str(ruta)).convert_alpha()
+            return pygame.transform.smoothscale(sprite, (58, 58))
+        except (OSError, pygame.error):
+            return None
+
+    def _dibujar_agente(self, p, centro):
+        """La figura no afecta el movimiento ni el algoritmo del agente."""
+        if self.sprite_agente is None:
+            self._trasgo(p, centro)
+        else:
+            destino = self.sprite_agente.get_rect(center=(centro[0], centro[1] - 3))
+            p.blit(self.sprite_agente, destino)
+
+    def _dibujar_jugador(self, p, centro, t):
+        """Dibuja a Gandalf si el recurso existe, o al explorador original."""
+        if self.sprite_jugador is None:
+            self._explorador(p, centro, t)
+        else:
+            destino = self.sprite_jugador.get_rect(center=(centro[0], centro[1] - 2))
+            p.blit(self.sprite_jugador, destino)
 
     def _explorador(self, p, centro, t):
         cx, cy = centro
@@ -213,19 +375,33 @@ class Interfaz:
 
     # ---- texto -------------------------------------------------------
     def _texto(self, fuente, texto, color, centro=None, izq=None):
-        img = fuente.render(texto, True, color)
-        r = img.get_rect()
-        if centro:
-            r.center = centro
-        if izq:
-            r.midleft = izq
-        self.pantalla.blit(img, r)
+        """Registra el texto para dibujarlo nítido sobre la ventana real.
+
+        Conserva las coordenadas del diseño lógico: se transforman justo al
+        presentar el fotograma. Esto evita escalar los glifos como píxeles.
+        """
+        if centro is None and izq is None:
+            return
+        if fuente is self.f_titulo:
+            tam = 34
+        elif fuente is self.f_texto:
+            tam = 20
+        else:
+            tam = 15
+        self._textos_pendientes.append((tam, str(texto), color, centro, izq))
 
     # ---- dibujo por cuadro -------------------------------------------
     def dibujar(self, motor, mensaje, mostrar_ruta=False):
+        self._actualizar_disposicion()
+        self._textos_pendientes.clear()
         estado = motor.estado
         lab = estado.laberinto
         resultado = motor.evaluar_resultado()
+        self._mostrar_final = resultado != ResultadoNivel.EN_CURSO
+        if self._mostrar_final:
+            self._pantalla_cinematografica(motor, resultado)
+            self._presentar_escalado()
+            return
         clave = (lab.obstaculos, lab.salida)
         if clave != self._clave:
             self.fondo = self._construir_fondo(lab)
@@ -234,7 +410,12 @@ class Interfaz:
         t = pygame.time.get_ticks()
         p = self.pantalla
         p.blit(self.fondo, (0, 0))
-        self._texto(self.f_texto, lab.nombre, PERGAMINO, centro=(ANCHO // 2, 76))
+        self._texto(self.f_titulo, "LAS MINAS DE MORIA", (0, 0, 0),
+                    centro=(ANCHO // 2 + 2, 36))
+        self._texto(self.f_titulo, "LAS MINAS DE MORIA", ORO,
+                    centro=(ANCHO // 2, 34))
+        self._texto(self.f_texto, lab.nombre, PERGAMINO,
+                    centro=(ANCHO // 2, 76))
 
         # ruta que calculó el agente en su último turno (si la expone): brasas
         if mostrar_ruta:
@@ -251,8 +432,8 @@ class Interfaz:
             self._llama(p, ax, ay, t, 0.9, ax)
         pc = self.rect(estado.pos_jugador).center
         ac = self.rect(estado.pos_agente).center
-        self._trasgo(p, ac)
-        self._explorador(p, pc, t)
+        self._dibujar_agente(p, ac)
+        self._dibujar_jugador(p, pc, t)
 
         # luz y oscuridad solo sobre el tablero
         if self.luz_activa:
@@ -274,8 +455,16 @@ class Interfaz:
                                      + [(pc, self.brillo_jugador)]):
                 p.blit(brillo, brillo.get_rect(center=(cx, cy)), special_flags=pygame.BLEND_RGB_ADD)
             p.set_clip(None)
-            self._trasgo(p, ac, solo_ojos=True)   # los ojos se ven aun en la oscuridad
-            self._llama(p, pc[0] + 15, pc[1] - 15, t)
+            # Conservamos los ojos del dibujo clásico solo en modo de respaldo:
+            # no se superponen sobre la cara del sprite del Balrog.
+            if self.sprite_agente is None:
+                self._trasgo(p, ac, solo_ojos=True)
+            if self.sprite_jugador is None:
+                self._llama(p, pc[0] + 15, pc[1] - 15, t)
+            else:
+                # Destello sutil en el bastón de Gandalf.
+                pygame.draw.circle(p, (255, 224, 140),
+                                   (pc[0] + 19, pc[1] - 18), 3)
 
         # etiquetas de la convención del enunciado: P, G, E
         self._texto(self.f_peq, "P", (200, 220, 255), centro=(pc[0] - 17, pc[1] + 20))
@@ -284,11 +473,61 @@ class Interfaz:
         self._texto(self.f_peq, "E", (60, 40, 10), centro=(er.centerx, er.bottom - 16))
 
         self._hud(motor, mensaje)
-        if resultado != ResultadoNivel.EN_CURSO:
-            self._final(motor, resultado)
+        self._presentar_escalado()
+
+    def _presentar_escalado(self):
+        """Escala el escenario pero dibuja los textos al tamaño nativo real."""
+        # PyGame 2 actualiza la superficie real al redimensionar la ventana.
+        self.ventana = pygame.display.get_surface()
+        w, h = self.ventana.get_size()
+        factor = min(w / self.ancho_logico, h / self.alto_logico)
+        ancho = max(1, round(self.ancho_logico * factor))
+        alto = max(1, round(self.alto_logico * factor))
+        x, y = (w - ancho) // 2, (h - alto) // 2
+        self.ventana.fill(FONDO)
+        imagen = (self.pantalla if (ancho, alto) == (self.ancho_logico, self.alto_logico)
+                  else pygame.transform.smoothscale(self.pantalla, (ancho, alto)))
+        self.ventana.blit(imagen, (x, y))
+
+        # Los bordes de las celdas se dibujan a resolución física, incluso al
+        # maximizar, para compensar el suavizado de las texturas del tablero.
+        if factor >= 0.65 and not self._mostrar_final:
+            izq = x + round(MARGEN_X * factor)
+            arriba = y + round(TOP * factor)
+            der = x + round((MARGEN_X + TAM * CELDA) * factor)
+            abajo = y + round((TOP + TAM * CELDA) * factor)
+            for i in range(1, TAM):
+                gx = x + round((MARGEN_X + i * CELDA) * factor)
+                gy = y + round((TOP + i * CELDA) * factor)
+                pygame.draw.line(self.ventana, (30, 27, 24), (gx, arriba), (gx, abajo))
+                pygame.draw.line(self.ventana, (30, 27, 24), (izq, gy), (der, gy))
+            pygame.draw.rect(self.ventana, ORO_OSC,
+                             pygame.Rect(izq, arriba, der - izq, abajo - arriba),
+                             max(1, round(2 * factor)))
+
+        # Fuentes recreadas al tamaño final: título, panel, coordenadas y P/G/E.
+        # Se cachean para no recrearlas a 30 fotogramas por segundo.
+        for tam, texto, color, centro, izq in self._textos_pendientes:
+            puntos = max(1, round(tam * factor))
+            if puntos not in self._fuentes_resolucion:
+                self._fuentes_resolucion[puntos] = pygame.font.SysFont(
+                    "georgia", puntos, bold=True)
+            fuente = self._fuentes_resolucion[puntos]
+            imagen_texto = fuente.render(texto, True, color)
+            rect = imagen_texto.get_rect()
+            if centro is not None:
+                rect.center = (x + round(centro[0] * factor),
+                               y + round(centro[1] * factor))
+            if izq is not None:
+                rect.midleft = (x + round(izq[0] * factor),
+                                y + round(izq[1] * factor))
+            self.ventana.blit(imagen_texto, rect)
         pygame.display.flip()
 
     def _hud(self, motor, mensaje):
+        if self.modo_panel == "lateral":
+            self._hud_lateral(motor, mensaje)
+            return
         estado = motor.estado
         agente = motor.agente_actual
         y0 = TOP + CELDA * TAM + 30
@@ -311,29 +550,88 @@ class Interfaz:
         if len(linea) > 68:
             linea = linea[:67] + "..."
         self._texto(self.f_peq, linea, ORO, izq=(x, y0 + 64))
-        self._texto(self.f_peq, "P explorador   G trasgo (agente)   E salida   # muro", ORO_OSC, izq=(x, y0 + 86))
+        self._texto(self.f_peq, "P Gandalf   G Balrog (agente)   E salida   # muro", ORO_OSC, izq=(x, y0 + 86))
         self._texto(self.f_peq, "WASD/flechas mover  H ruta  L luz  R reintentar  Esc salir", ORO_OSC,
                     izq=(x, y0 + 106))
 
-    def _final(self, motor, resultado):
+    def _texto_envuelto(self, texto, x, y, ancho, max_lineas=2, color=PERGAMINO):
+        """Dibuja texto en un área estrecha sin que se salga del panel lateral."""
+        fuente = self.f_peq
+        palabras = str(texto).split()
+        if not palabras:
+            return y
+        lineas, linea = [], ""
+        for palabra in palabras:
+            propuesta = f"{linea} {palabra}".strip()
+            if fuente.size(propuesta)[0] <= ancho:
+                linea = propuesta
+            else:
+                if linea:
+                    lineas.append(linea)
+                linea = palabra
+        if linea:
+            lineas.append(linea)
+        if len(lineas) > max_lineas:
+            lineas = lineas[:max_lineas]
+            ultima = lineas[-1]
+            while ultima and fuente.size(ultima + "...")[0] > ancho:
+                ultima = ultima[:-1]
+            lineas[-1] = ultima + "..."
+        for item in lineas:
+            self._texto(fuente, item, color, izq=(x, y))
+            y += 22
+        return y
+
+    def _hud_lateral(self, motor, mensaje):
+        """Bitácora lateral para ventanas anchas; no altera el motor del juego."""
+        estado = motor.estado
+        agente = motor.agente_actual
         p = self.pantalla
-        cy = TOP + CELDA * TAM // 2
-        velo = pygame.Surface((ANCHO, 150))
-        velo.set_alpha(215)
-        velo.fill((8, 6, 4))
-        p.blit(velo, (0, cy - 75))
-        pygame.draw.line(p, ORO_OSC, (MARGEN_X, cy - 75), (ANCHO - MARGEN_X, cy - 75), 2)
-        pygame.draw.line(p, ORO_OSC, (MARGEN_X, cy + 75), (ANCHO - MARGEN_X, cy + 75), 2)
-        if resultado == ResultadoNivel.CAPTURA_AGENTE:
-            self._texto(self.f_titulo, "TE ATRAPARON", (230, 70, 55), centro=(ANCHO // 2, cy - 18))
-            self._texto(self.f_texto, "R: reintentar el nivel", PERGAMINO, centro=(ANCHO // 2, cy + 30))
-        elif motor.indice_nivel + 1 < motor.total_niveles:
-            self._texto(self.f_titulo, "NIVEL SUPERADO", ORO, centro=(ANCHO // 2, cy - 18))
-            self._texto(self.f_texto, "ENTER: siguiente nivel", PERGAMINO, centro=(ANCHO // 2, cy + 30))
-        else:
-            self._texto(self.f_titulo, "HAS ESCAPADO DE MORIA", ORO, centro=(ANCHO // 2, cy - 18))
-            self._texto(self.f_texto, "Completaste los 3 niveles   (R: repetir este nivel, Esc: salir)",
-                        PERGAMINO, centro=(ANCHO // 2, cy + 30))
+        panel = pygame.Rect(630, 110, 348, 560)
+        pygame.draw.rect(p, (34, 30, 26), panel, border_radius=5)
+        pygame.draw.rect(p, (70, 64, 56), panel, 4, border_radius=5)
+        pygame.draw.rect(p, ORO_OSC, panel.inflate(-12, -12), 1, border_radius=4)
+        x, ancho = 649, 308
+
+        self._texto(self.f_texto, "BITÁCORA", ORO, izq=(x, 142))
+        pygame.draw.line(p, ORO_OSC, (x, 163), (x + ancho, 163), 1)
+        self._texto(self.f_peq, f"NIVEL {motor.nivel_actual}/{motor.total_niveles}", ORO,
+                    izq=(x, 187))
+        self._texto(self.f_peq, f"TURNO {estado.numero_turno}", PERGAMINO,
+                    izq=(x, 211))
+        pygame.draw.line(p, (65, 58, 45), (x, 230), (x + ancho, 230), 1)
+
+        self._texto(self.f_peq, "GANDALF (P)", ORO, izq=(x, 251))
+        self._texto(self.f_texto, str(estado.pos_jugador), PERGAMINO, izq=(x, 275))
+        self._texto(self.f_peq, "BALROG (G)", ORO, izq=(x + 171, 251))
+        self._texto(self.f_texto, str(estado.pos_agente), PERGAMINO, izq=(x + 171, 275))
+        pygame.draw.line(p, (65, 58, 45), (x, 298), (x + ancho, 298), 1)
+
+        self._texto(self.f_peq, "ÚLTIMO MOVIMIENTO", ORO, izq=(x, 317))
+        self._texto_envuelto(mensaje, x, 342, ancho, max_lineas=2)
+        pygame.draw.line(p, (65, 58, 45), (x, 377), (x + ancho, 377), 1)
+
+        self._texto(self.f_peq, "INTELIGENCIA ARTIFICIAL", ORO, izq=(x, 398))
+        self._texto_envuelto(agente.nombre, x, 420, ancho, max_lineas=2)
+        stats = agente.obtener_estadisticas()
+        lineas_stats = []
+        for clave, etiqueta in (("modo", "Modo"), ("nodos_explorados", "Nodos explorados"),
+                               ("pasos_ruta", "Pasos de ruta"), ("consultas", "Consultas"),
+                               ("accion", "Acción")):
+            if clave in stats and stats[clave] is not None:
+                lineas_stats.append(f"{etiqueta}: {stats[clave]}")
+        for i, linea in enumerate(lineas_stats[:2]):
+            self._texto_envuelto(linea, x, 466 + i * 21, ancho, max_lineas=1,
+                                color=ORO)
+        pygame.draw.line(p, (65, 58, 45), (x, 519), (x + ancho, 519), 1)
+
+        self._texto(self.f_peq, "CONTROLES", ORO, izq=(x, 540))
+        self._texto(self.f_peq, "WASD / flechas: moverse", PERGAMINO, izq=(x, 563))
+        self._texto(self.f_peq, "H: ruta     L: luz", PERGAMINO, izq=(x, 586))
+        self._texto(self.f_peq, "R: reintentar   Esc: salir", PERGAMINO, izq=(x, 609))
+        self._texto(self.f_peq, "P Gandalf · G Balrog · E salida", ORO_OSC,
+                    izq=(x, 640))
+
 
 
 # ======================================================================
@@ -362,6 +660,10 @@ def ejecutar_en_pygame(motor: MotorJuego) -> None:
             if evento.type == pygame.QUIT:
                 pygame.quit()
                 return
+            if evento.type == pygame.VIDEORESIZE:
+                # Los movimientos no dependen del tamaño de la ventana.
+                # En el siguiente dibujo se vuelve a encajar el lienzo.
+                continue
             if evento.type != pygame.KEYDOWN:
                 continue
 
