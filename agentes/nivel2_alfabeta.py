@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Nivel 2: Agente perseguidor con Minimax y poda alfa-beta.
 
 Se basa en los Algoritmos 9, 10 y 11 (DECISIÓN-MINIMAX, MAX-VALOR y MIN-VALOR con poda) del Tema 3.
