@@ -7,7 +7,7 @@ Todo el arte se dibuja por código (sin imágenes externas):
   #  muro de piedra       .  piso de losas       E  puerta con luz
   P  explorador con antorcha                      G  trasgo (agente)
 
-Ejecutar desde la raíz del repo:  python main_grafico.py
+Ejecutar desde la raíz del repo:  py main.py
 """
 
 import math
