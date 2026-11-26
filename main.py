@@ -1,27 +1,40 @@
+import sys
+from pathlib import Path
+
+from agentes.nivel1_astar import AgenteAStar
+from agentes.nivel2_alfabeta import AgenteAlfaBeta
+from agentes.nivel3_guardian import AgenteGuardian
 from interfaz.consola_basica import ejecutar_en_consola
-from nucleo.agente_base import AgenteAleatorio
+# Reemplaza esta línea con el import real que usa tu archivo main_grafico.py:
+from interfaz.pygame_moria import ejecutar_en_pygame
 from nucleo.mapa import cargar_laberinto_desde_archivo
 from nucleo.motor import MotorJuego
 
-# Cuando se integren los modulos, descomenten esto
-from agentes.nivel1_astar import AgenteAStar
-# from agentes.nivel2_alfabeta import AgenteAlfaBeta
-from agentes.nivel3_guardian import AgenteGuardian
+DIRECTORIO_MAPAS = Path(__file__).resolve().parent / "mapas"
+
+NIVELES_CONFIGURACION = [
+    ("nivel1.txt", "Nivel 1 - A*"),
+    ("nivel2.txt", "Nivel 2 - Alfa-Beta"),
+    ("nivel3.txt", "Nivel 3 - Lógica Proposicional"),
+]
 
 
 def construir_motor() -> MotorJuego:
-    lab1 = cargar_laberinto_desde_archivo("mapas/nivel1.txt", nombre="Nivel 1 - A*")
-    lab2 = cargar_laberinto_desde_archivo("mapas/nivel2.txt", nombre="Nivel 2 - Alfa-Beta")
-    lab3 = cargar_laberinto_desde_archivo("mapas/nivel3.txt", nombre="Nivel 3 - Lógica Proposicional")
-
+    agentes = [AgenteAStar(), AgenteAlfaBeta(), AgenteGuardian()]
     niveles = [
-        (lab1, AgenteAStar()), 
-        (lab2, AgenteAleatorio(semilla=2)),  #se cambia nombre por el que se quiera
-        (lab3, AgenteAleatorio(semilla=3)),  #se cambia nombre por el que se quiera
+        (cargar_laberinto_desde_archivo(DIRECTORIO_MAPAS / archivo, nombre=titulo), agente)
+        for (archivo, titulo), agente in zip(NIVELES_CONFIGURACION, agentes)
     ]
     return MotorJuego(niveles)
 
 
-if __name__ == "__main__":
+def main() -> None:
     motor = construir_motor()
-    ejecutar_en_consola(motor)
+    if "--consola" in sys.argv:
+        ejecutar_en_consola(motor)
+    else:
+        ejecutar_en_pygame(motor)
+
+
+if __name__ == "__main__":
+    main()
