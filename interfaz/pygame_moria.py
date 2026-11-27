@@ -7,7 +7,6 @@ El tablero se dibuja por código y admite sprites PNG opcionales:
   #  muro de piedra       .  piso de losas       E  puerta con luz
   P  Gandalf (mago)                               G  Troll (agente)
 Los sprites son visuales: P/G siguen indicando posiciones del motor.
-Los finales de derrota y victoria usan escenas pixel art opcionales.
 El lienzo se adapta a la ventana; las letras se rasterizan a tamaño real
 para que no se borren al escalar.
 
@@ -72,8 +71,6 @@ def _brillo(radio, color):
 
 class GestorMusica:
     """Audio ambiental independiente del motor del juego.
-
-    Coloca inicio, partida, derrota y victoria en assets/musica/.
     Admite .ogg, .mp3 o .wav y evita reiniciar la pista por fotograma.
     Si no hay dispositivo de audio o faltan archivos, se juega en silencio.
     """
@@ -94,8 +91,6 @@ class GestorMusica:
             print(f"[Música] Audio no disponible; se continúa sin música: {error}")
 
     def _archivo(self, nombre):
-        # Si agregas una pista en OGG o MP3, tendrá preferencia sobre
-        # los audios WAV de ejemplo incluidos con el proyecto.
         for extension in (".ogg", ".mp3", ".wav"):
             archivo = self.CARPETA / f"{nombre}{extension}"
             if archivo.is_file():
@@ -149,7 +144,7 @@ class Interfaz:
         pygame.init()
         pygame.display.set_caption("Escape del laberinto - Las minas de Moria")
         # Seleccionamos primero la distribución que mejor aprovecha el escritorio.
-        # Los tamaños de los elementos del laberinto no cambian: se escala el lienzo
+        # pero los tamaños de los elementos del laberinto no cambian: se escala el lienzo
         # completo al final, conservando las proporciones.
         info = pygame.display.Info()
         escritorio_w, escritorio_h = info.current_w, info.current_h
@@ -175,8 +170,7 @@ class Interfaz:
         self._mostrar_final = False
         self.seleccion_menu = 0  # 0: Iniciar, 1: Salir
         self.menu_usa_raton = False  # permite seleccionar con teclado aunque el mouse esté quieto
-        # El juego sigue usando un lienzo lógico para el tablero, pero el texto
-        # se pinta después directamente sobre la ventana a su resolución real.
+
         self._textos_pendientes = []
         self._fuentes_resolucion = {}
 
