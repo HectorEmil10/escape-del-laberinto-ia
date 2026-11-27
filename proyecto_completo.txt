@@ -1,0 +1,2181 @@
+﻿========================================
+ARCHIVO: main.py
+========================================
+from interfaz.consola_basica import ejecutar_en_consola
+from nucleo.agente_base import AgenteAleatorio
+from nucleo.mapa import cargar_laberinto_desde_archivo
+from nucleo.motor import MotorJuego
+
+# Cuando se integren los modulos, descomenten esto
+from agentes.nivel1_astar import AgenteAStar
+# from agentes.nivel2_alfabeta import AgenteAlfaBeta
+from agentes.nivel3_guardian import AgenteGuardian
+
+
+def construir_motor() -> MotorJuego:
+    lab1 = cargar_laberinto_desde_archivo("mapas/nivel1.txt", nombre="Nivel 1 - A*")
+    lab2 = cargar_laberinto_desde_archivo("mapas/nivel2.txt", nombre="Nivel 2 - Alfa-Beta")
+    lab3 = cargar_laberinto_desde_archivo("mapas/nivel3.txt", nombre="Nivel 3 - LÃ³gica Proposicional")
+
+    niveles = [
+        (lab1, AgenteAStar()), 
+        (lab2, AgenteAleatorio(semilla=2)),  #se cambia nombre por el que se quiera
+        (lab3, AgenteAleatorio(semilla=3)),  #se cambia nombre por el que se quiera
+    ]
+    return MotorJuego(niveles)
+
+
+if __name__ == "__main__":
+    motor = construir_motor()
+    ejecutar_en_consola(motor)
+
+
+========================================
+ARCHIVO: main_grafico.py
+========================================
+"""Punto de entrada con interfaz grÃ¡fica (PyGame). TemÃ¡tica: Las minas de Moria.
+
+Usa exactamente el mismo motor y los mismos agentes que main.py; solo cambia
+la interfaz. Ejecutar desde la raÃ­z del repositorio:
+
+    python main_grafico.py
+"""
+
+from interfaz.pygame_moria import ejecutar_en_pygame
+from main import construir_motor
+
+if __name__ == "__main__":
+    ejecutar_en_pygame(construir_motor())
+
+
+
+========================================
+ARCHIVO: probar_nivel3.py
+========================================
+"""Ejecuta solamente el nivel 3 con la interfaz existente."""
+from pathlib import Path
+
+from agentes.nivel3_guardian import AgenteGuardian
+from interfaz.consola_basica import ejecutar_en_consola
+from nucleo.mapa import cargar_laberinto_desde_archivo
+from nucleo.motor import MotorJuego
+
+if __name__ == "__main__":
+    ruta = Path(__file__).resolve().parent / "mapas" / "nivel3.txt"
+    lab = cargar_laberinto_desde_archivo(ruta, nombre="Nivel 3 - LÃ³gica Proposicional")
+    ejecutar_en_consola(MotorJuego([(lab, AgenteGuardian())]))
+
+
+========================================
+ARCHIVO: README.md
+========================================
+# Escape del Laberinto - Proyecto Final IA (0406, Semestre 2027-1)
+
+## Requisitos
+- Python 3.10 o superior
+
+## Instalacion (PowerShell)
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+
+
+========================================
+ARCHIVO: requirements.txt
+========================================
+# Interfaz grafica (PyGame). Se usa pygame-ce porque pygame 2.6.1 no tiene
+# instalador para Python 3.14. Se importa igual: import pygame
+# No se permiten bibliotecas que implementen directamente A*, Minimax o logica proposicional.
+pygame-ce>=2.5.6
+
+
+
+========================================
+ARCHIVO: agentes\motor_logico.py
+========================================
+"""Motor de inferencia proposicional del nivel 3.
+
+Este mÃ³dulo no mueve al personaje ni determina patrullajes: solamente
+almacena proposiciones, aplica reglas y contesta consultas lÃ³gicas.
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict, deque
+from dataclasses import dataclass
+import re
+from typing import Iterable
+
+
+_SIMBOLO = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validar_simbolo(valor: str) -> str:
+    """Verifica que una proposiciÃ³n sea atÃ³mica y pueda usarse como clave."""
+    if not isinstance(valor, str) or not _SIMBOLO.fullmatch(valor):
+        raise ValueError(f"ProposiciÃ³n invÃ¡lida: {valor!r}")
+    return valor
+
+
+@dataclass(frozen=True)
+class ReglaHorn:
+    """Regla definida de Horn: premisa1 âˆ§ ... âˆ§ premisaN â‡’ conclusion."""
+
+    premisas: tuple[str, ...]
+    conclusion: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.premisas, str):
+            raise TypeError("Las premisas deben ser una secuencia, no una cadena.")
+        # A âˆ§ A â‡’ B tiene el mismo significado que A â‡’ B.
+        nuevas = tuple(dict.fromkeys(_validar_simbolo(x) for x in self.premisas))
+        object.__setattr__(self, "premisas", nuevas)
+        _validar_simbolo(self.conclusion)
+
+    def __str__(self) -> str:
+        if not self.premisas:
+            return self.conclusion
+        return " âˆ§ ".join(self.premisas) + " â‡’ " + self.conclusion
+
+
+class BaseConocimiento:
+    """Base de conocimiento con operaciones DECIR y PREGUNTAR
+
+    Las inferencias son calculadas al consultar, no se incorporan como hechos,
+    de forma que no se altere la base al llamar varias veces a PREGUNTAR
+    """
+
+    def __init__(
+        self,
+        hechos: Iterable[str] = (),
+        reglas: Iterable[ReglaHorn] = (),
+    ) -> None:
+        self.hechos: set[str] = set()
+        self.reglas: list[ReglaHorn] = []
+        for regla in reglas:
+            self.decir(regla)
+        for hecho in hechos:
+            self.decir(hecho)
+
+    def decir(
+        self,
+        proposicion: str | ReglaHorn | Iterable[str],
+        conclusion: str | None = None,
+    ) -> None:
+        """Agrega un hecho o una regla.
+
+        Las siguientes tres formas son vÃ¡lidas:
+          decir("A")                         # hecho
+          decir(("A", "B"), "C")           # regla de Horn (API del guardiÃ¡n)
+          decir(ReglaHorn(("A", "B"), "C"))  # regla como objeto
+        Una regla con cero premisas se convierte en un hecho
+        """
+        if conclusion is None:
+            if isinstance(proposicion, str):
+                self.hechos.add(_validar_simbolo(proposicion))
+                return
+            if not isinstance(proposicion, ReglaHorn):
+                raise TypeError("Para agregar una regla, proporciona la conclusiÃ³n.")
+            regla = proposicion
+        else:
+            if isinstance(proposicion, str):
+                premisas = (proposicion,)
+            elif isinstance(proposicion, ReglaHorn):
+                raise TypeError("No pases una conclusiÃ³n adicional a ReglaHorn.")
+            else:
+                premisas = tuple(proposicion)
+            regla = ReglaHorn(premisas, conclusion)
+
+        if not regla.premisas:
+            self.hechos.add(regla.conclusion)
+        elif regla not in self.reglas:
+            self.reglas.append(regla)
+
+    def agregar_regla(self, premisas: Iterable[str], conclusion: str) -> None:
+        """Alias para registrar la regla de Horn sin construir el objeto"""
+        self.decir(tuple(premisas), conclusion)
+
+    def preguntar(self, objetivo: str) -> bool:
+        """Devuelve True si la BC puede demostrar el objetivo con Horn"""
+        _validar_simbolo(objetivo)
+        demostrado, _, _ = self._encadenamiento_hacia_adelante(objetivo)
+        return demostrado
+
+    def inferir_todos(self) -> frozenset[str]:
+        """Calcula todas las proposiciones deducibles sin modificar la BC"""
+        _, conocidos, _ = self._encadenamiento_hacia_adelante(None)
+        return frozenset(conocidos)
+
+    def explicar(self, objetivo: str) -> tuple[bool, list[str]]:
+        """Indica si se demuestra el objetivo y las reglas que se aplicaron"""
+        _validar_simbolo(objetivo)
+        demostrado, _, traza = self._encadenamiento_hacia_adelante(objetivo)
+        return demostrado, traza
+
+    def _encadenamiento_hacia_adelante(
+        self, objetivo: str | None,
+    ) -> tuple[bool, set[str], list[str]]:
+        """AdaptaciÃ³n de Â¿IMPLICACIÃ“N-EHD-LP?(BC, q), Tema 4, Algoritmo 6
+
+        cuenta[c]: cuÃ¡ntas premisas faltan para activar una regla
+        inferido: sÃ­mbolos que ya fueron procesados
+        agenda: sÃ­mbolos verdaderos pendientes por procesar
+        """
+        cuenta = [len(regla.premisas) for regla in self.reglas]
+        # Ãndice para buscar Ãºnicamente reglas cuyo antecedente contiene p
+        dependientes: dict[str, list[int]] = defaultdict(list)
+        for i, regla in enumerate(self.reglas):
+            for premisa in regla.premisas:
+                dependientes[premisa].append(i)
+
+        conocidos = set(self.hechos)
+        agenda = deque(sorted(conocidos))
+        inferido: set[str] = set()
+        traza: list[str] = []
+
+        while agenda:
+            p = agenda.popleft()
+            if p == objetivo:
+                return True, conocidos, traza
+            if p in inferido:
+                continue
+            inferido.add(p)
+            for indice in dependientes.get(p, ()):
+                cuenta[indice] -= 1
+                if cuenta[indice] == 0:
+                    regla = self.reglas[indice]
+                    if regla.conclusion not in conocidos:
+                        conocidos.add(regla.conclusion)
+                        agenda.append(regla.conclusion)
+                        traza.append(str(regla))
+
+        # Si no hay objetivo, se solicitÃ³ el cierre lÃ³gico completo
+        return objetivo is None, conocidos, traza
+
+
+def crear_base_para_turno(
+    reglas: Iterable[ReglaHorn], percepciones: Iterable[str]
+) -> BaseConocimiento:
+    """Alternativa para agentes sin memoria, creando una BC nueva por turno."""
+    return BaseConocimiento(hechos=percepciones, reglas=reglas)
+
+
+
+========================================
+ARCHIVO: agentes\nivel1_astar.py
+========================================
+"""Nivel 1: agente perseguidor con A* (Integrante 2 Rodrigo Yo).
+
+Se basa en el Algoritmo 5 (A*) del Tema 3.
+
+Lo que ya nos da el motor del Integrante 1 (carpeta nucleo/):
+  - Un estado es una celda (x, y). El estado del juego trae pos_agente y pos_jugador.
+  - estado.laberinto.vecinos(pos) nos da los movimientos posibles desde una celda
+    (cada uno cuesta 1). Salen en este orden: ARRIBA, ABAJO, IZQUIERDA, DERECHA,
+    y ese orden afecta cuando hay rutas igual de cortas.
+  - La heurÃ­stica es distancia_manhattan(a, b), que ya estÃ¡ en nucleo/mapa.py.
+
+Lo que hace _a_estrella: arma la frontera, g y padre, saca la celda con menor
+f = g + h, y si es la meta arma la ruta hacia atrÃ¡s con los padres. Si no es la
+meta, revisa sus vecinos y los actualiza si son nuevos o si encontrÃ³ un camino
+mÃ¡s barato.
+
+Con el motor: elegir_movimiento(estado) regresa 'ARRIBA', 'ABAJO', 'IZQUIERDA'
+o 'DERECHA'. Se calcula en cada turno del agente (no hay rutas guardadas de
+antes): el inicio es donde estÃ¡ el agente, la meta es donde estÃ¡ el jugador, y
+solo se usa el primer paso de la ruta.
+"""
+
+import heapq
+from itertools import count
+
+from nucleo.agente_base import AgenteBase
+from nucleo.estado import EstadoJuego, movimientos_validos
+from nucleo.mapa import ACCIONES, Laberinto, Posicion, distancia_manhattan  # noqa: F401
+
+
+class AgenteAStar(AgenteBase):
+    def __init__(self) -> None:
+        super().__init__(nombre="Agente A* (Nivel 1)")
+        # La interfaz grÃ¡fica dibuja esta ruta cuando se presiona H.
+        self.ultima_ruta: list[Posicion] = []
+        self._nodos_explorados: int = 0
+
+    # ------------------------------------------------------------------
+    # Contrato con el motor
+    # ------------------------------------------------------------------
+    def elegir_movimiento(self, estado: EstadoJuego) -> str:
+        inicio = estado.pos_agente
+        meta = estado.pos_jugador
+
+        ruta = self._a_estrella(inicio, meta, estado.laberinto)
+
+        if ruta is not None and len(ruta) >= 2:
+            self.ultima_ruta = ruta
+            return self._accion_hacia(inicio, ruta[1])  # solo el primer paso
+
+        # Sin ruta (o ya en la meta): el motor exige una acciÃ³n vÃ¡lida.
+        self.ultima_ruta = []
+        return movimientos_validos(estado, actor="AGENTE")[0]
+
+    def reiniciar(self) -> None:
+        self.ultima_ruta = []
+        self._nodos_explorados = 0
+
+    def obtener_estadisticas(self) -> dict:
+        stats: dict = {"nodos_explorados": self._nodos_explorados}
+        if self.ultima_ruta:
+            stats["pasos_ruta"] = len(self.ultima_ruta) - 1
+        return stats
+
+    # ------------------------------------------------------------------
+    # Auxiliar: traduce "pasar de una celda a la siguiente" a una acciÃ³n
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _accion_hacia(origen: Posicion, destino: Posicion) -> str:
+        for accion, (dx, dy) in ACCIONES.items():
+            if (origen[0] + dx, origen[1] + dy) == destino:
+                return accion
+        raise ValueError(f"{destino} no es vecino de {origen}.")
+
+    # ------------------------------------------------------------------
+    # Algoritmo 5 (A*)
+    # ------------------------------------------------------------------
+    def _a_estrella(self, inicio: Posicion, meta: Posicion, laberinto: Laberinto) -> list[Posicion] | None:
+        """Devuelve la ruta [inicio, ..., meta] o None si no existe.
+
+        Actualiza self._nodos_explorados (cuÃ¡ntos nodos se extrajeron de
+        la frontera) para que se muestre en el panel de la interfaz.
+        """
+        # InicializaciÃ³n: g(s) = 0, padre(s) = NULO y frontera con s, f(s) = h(s).
+        g: dict[Posicion, int] = {inicio: 0}
+        padre: dict[Posicion, Posicion | None] = {inicio: None}
+        desempate = count()  # a igual f, sale primero el que se insertÃ³ antes
+        frontera = [(distancia_manhattan(inicio, meta), next(desempate), inicio)]
+        self._nodos_explorados = 0
+
+        # Mientras la frontera no estÃ© vacÃ­a.
+        while frontera:
+            # Extraer el nodo n con menor f(n).
+            f_n, _, n = heapq.heappop(frontera)
+
+            # Entrada vieja: luego se encontrÃ³ un camino mejor hacia n. Se ignora.
+            if f_n > g[n] + distancia_manhattan(n, meta):
+                continue
+
+            self._nodos_explorados += 1
+
+            # Si n es la meta, se reconstruye la ruta siguiendo los padres hacia atrÃ¡s
+            if n == meta:
+                ruta = []
+                actual: Posicion | None = n
+                while actual is not None:
+                    ruta.append(actual)
+                    actual = padre[actual]
+                ruta.reverse()
+                return ruta
+
+            # Para cada vecino v de n, cada movimiento cuesta 1.
+            for _accion, v in laberinto.vecinos(n):
+                g_nuevo = g[n] + 1
+                # v no explorado, o se encontrÃ³ un camino mÃ¡s barato hacia v.
+                if v not in g or g_nuevo < g[v]:
+                    g[v] = g_nuevo
+                    padre[v] = n
+                    f_v = g_nuevo + distancia_manhattan(v, meta)
+                    heapq.heappush(frontera, (f_v, next(desempate), v))
+
+        # La frontera se vaciÃ³ sin llegar a la meta: no hay ruta.
+        return None
+
+
+
+========================================
+ARCHIVO: agentes\nivel2_alfabeta.py
+========================================
+"""Nivel 2: Agente perseguidor con Minimax y poda alfa-beta.
+
+Se basa en los Algoritmos 9, 10 y 11 (DECISIÃ“N-MINIMAX, MAX-VALOR y MIN-VALOR con poda) del Tema 3.
+El agente es el jugador MAX (perseguidor) y el humano es MIN.
+"""
+
+from nucleo.agente_base import AgenteBase
+from nucleo.estado import EstadoJuego, movimientos_validos
+from nucleo.mapa import ACCIONES, Laberinto, Posicion, distancia_manhattan  # noqa: F401
+
+
+class EstadoSimulacion:
+    """Clase auxiliar ligera para simular estados futuros en el Ã¡rbol de bÃºsqueda 
+    sin alterar el estado real del motor del juego proporcionado por el Integrante 1.
+    """
+    def __init__(self, pos_agente: Posicion, pos_jugador: Posicion, salida: Posicion, laberinto: Laberinto):
+        self.pos_agente = pos_agente
+        self.pos_jugador = pos_jugador
+        self.salida = salida
+        self.laberinto = laberinto
+
+    def es_terminal(self) -> str | None:
+        """Determina si el estado es terminal:
+        - Captura: El agente (MAX) ocupa la misma celda que el humano (MIN).
+        - Escape: El humano (MIN) alcanza la celda de la salida.
+        """
+        if self.pos_agente == self.pos_jugador:
+            return "captura"
+        if self.pos_jugador == self.salida:
+            return "escape"
+        return None
+
+    def utilidad(self) -> int:
+        """Asigna una utilidad numÃ©rica a los estados terminales desde la perspectiva de MAX."""
+        resultado = self.es_terminal()
+        if resultado == "captura":
+            return 1000   # Gana el agente (MAX)
+        elif resultado == "escape":
+            return -1000  # Gana el humano (MIN)
+        return 0
+
+    def evaluar_heuristica(self) -> int:
+        """FunciÃ³n heurÃ­stica para estados no terminales al alcanzar la profundidad mÃ¡xima.
+        FÃ³rmula: Distancia del humano a la salida - Distancia del agente al humano.
+        Busca que el humano estÃ© mÃ¡s lejos de la salida y mÃ¡s cerca del agente.
+        """
+        d_humano_salida = distancia_manhattan(self.pos_jugador, self.salida)
+        d_agente_humano = distancia_manhattan(self.pos_agente, self.pos_jugador)
+        return d_humano_salida - d_agente_humano
+
+    def sucesores_max(self) -> list[tuple[str, "EstadoSimulacion"]]:
+        """Genera los sucesores para el turno de MAX (Agente) usando laberinto.vecinos."""
+        lista = []
+        for accion, nueva_pos in self.laberinto.vecinos(self.pos_agente):
+            nuevo_estado = EstadoSimulacion(nueva_pos, self.pos_jugador, self.salida, self.laberinto)
+            lista.append((accion, nuevo_estado))
+        return lista
+
+    def sucesores_min(self) -> list[tuple[str, "EstadoSimulacion"]]:
+        """Genera los sucesores para el turno de MIN (Humano) usando laberinto.vecinos."""
+        lista = []
+        for accion, nueva_pos in self.laberinto.vecinos(self.pos_jugador):
+            nuevo_estado = EstadoSimulacion(self.pos_agente, nueva_pos, self.salida, self.laberinto)
+            lista.append((accion, nuevo_estado))
+        return lista
+
+
+class AgenteAlfaBeta(AgenteBase):
+    def __init__(self, profundidad_max: int = 4) -> None:
+        super().__init__(nombre="Agente Minimax Alfa-Beta (Nivel 2)")
+        self.profundidad_max = profundidad_max
+        self._nodos_explorados: int = 0
+        self.ultima_accion: str | None = None
+
+    # ------------------------------------------------------------------
+    # Contrato con el motor
+    # ------------------------------------------------------------------
+    def elegir_movimiento(self, estado: EstadoJuego) -> str:
+        # Obtenemos la posiciÃ³n de la salida desde el estado o el laberinto
+        salida_celda = getattr(estado, "salida", getattr(estado.laberinto, "salida", (10, 10)))
+        
+        sim_estado = EstadoSimulacion(
+            pos_agente=estado.pos_agente,
+            pos_jugador=estado.pos_jugador,
+            salida=salida_celda,
+            laberinto=estado.laberinto
+        )
+
+        self._nodos_explorados = 0
+        alfa = -float('inf')
+        beta = float('inf')
+        
+        mejor_valor = -float('inf')
+        mejor_accion = None
+
+        sucesores = sim_estado.sucesores_max()
+        if not sucesores:
+            self.ultima_accion = None
+            return movimientos_validos(estado, actor="AGENTE")[0]
+
+        # Algoritmo 9: DECISIÃ“N-MINIMAX con alfa-beta
+        for accion, sucesor in sucesores:
+            self._nodos_explorados += 1
+            # Profundidad 1 consumida por este primer movimiento de MAX
+            valor = self._min_valor(sucesor, alfa, beta, profundidad_actual=1)
+            
+            if valor > mejor_valor:
+                mejor_valor = valor
+                mejor_accion = accion
+                
+            alfa = max(alfa, mejor_valor)
+
+        print(f"[Nivel 2] Nodos explorados con poda alfa-beta: {self._nodos_explorados}")
+        self.ultima_accion = mejor_accion
+        return mejor_accion if mejor_accion else movimientos_validos(estado, actor="AGENTE")[0]
+
+    def reiniciar(self) -> None:
+        self._nodos_explorados = 0
+        self.ultima_accion = None
+
+    def obtener_estadisticas(self) -> dict:
+        return {"nodos_explorados": self._nodos_explorados}
+
+    # ------------------------------------------------------------------
+    # Algoritmo 10: MAX_VALOR con poda alfa-beta
+    # ------------------------------------------------------------------
+    def _max_valor(self, estado: EstadoSimulacion, alfa: float, beta: float, profundidad_actual: int) -> float:
+        if estado.es_terminal() is not None or profundidad_actual >= self.profundidad_max:
+            if estado.es_terminal() is not None:
+                return estado.utilidad()
+            return estado.evaluar_heuristica()
+
+        self._nodos_explorados += 1
+        v = -float('inf')
+        
+        for _, sucesor in estado.sucesores_max():
+            v = max(v, self._min_valor(sucesor, alfa, beta, profundidad_actual + 1))
+            if v >= beta:
+                return v  # Poda Beta
+            alfa = max(alfa, v)
+        return v
+
+    # ------------------------------------------------------------------
+    # Algoritmo 11: MIN_VALOR con poda alfa-beta
+    # ------------------------------------------------------------------
+    def _min_valor(self, estado: EstadoSimulacion, alfa: float, beta: float, profundidad_actual: int) -> float:
+        if estado.es_terminal() is not None or profundidad_actual >= self.profundidad_max:
+            if estado.es_terminal() is not None:
+                return estado.utilidad()
+            return estado.evaluar_heuristica()
+
+        self._nodos_explorados += 1
+        v = float('inf')
+        
+        for _, sucesor in estado.sucesores_min():
+            v = min(v, self._max_valor(sucesor, alfa, beta, profundidad_actual + 1))
+            if v <= alfa:
+                return v  # Poda Alfa
+            beta = min(beta, v)
+        return v
+
+
+
+========================================
+ARCHIVO: agentes\nivel3_guardian.py
+========================================
+"""Nivel 3: agente guardiÃ¡n basado en conocimiento.
+Cada proposiciÃ³n perceptual y cada acciÃ³n se identifican con el tiempo del agente.
+"""
+from typing import Any
+
+from agentes.motor_logico import BaseConocimiento
+from nucleo.agente_base import AgenteBase
+from nucleo.estado import EstadoJuego, movimientos_validos
+from nucleo.mapa import ACCIONES, Posicion
+
+
+class AgenteGuardian(AgenteBase):
+    PATRULLA: tuple[Posicion, ...] = ((8, 9), (9, 9), (9, 8), (8, 8))
+    REGLAS = {
+        "ARRIBA": ("JugadorArriba", "MoverArriba"),
+        "ABAJO": ("JugadorAbajo", "MoverAbajo"),
+        "IZQUIERDA": ("JugadorIzquierda", "MoverIzquierda"),
+        "DERECHA": ("JugadorDerecha", "MoverDerecha"),
+    }
+
+    def __init__(self, fabrica_bc=BaseConocimiento) -> None:
+        super().__init__(nombre="Agente GuardiÃ¡n (LÃ³gica Proposicional)")
+        self._fabrica_bc = fabrica_bc
+        self.reiniciar()
+
+    def reiniciar(self) -> None:
+        self.bc = self._fabrica_bc()
+        self.t = 0
+        self._estadisticas: dict[str, Any] = {}
+
+    def _sentencia(self, proposicion: str) -> str:
+        """Genera un sÃ­mbolo proposicional distinto para cada instante."""
+        return f"{proposicion}_{self.t}"
+
+    @staticmethod
+    def _posicion(pos: Posicion) -> str:
+        return f"EnPosicion_{pos[0]}_{pos[1]}"
+
+    def _registrar_reglas(self) -> None:
+        for direccion, (percepcion, accion) in self.REGLAS.items():
+            self.bc.decir((self._sentencia(percepcion),
+                        self._sentencia(f"Valido_{direccion}")),
+                        self._sentencia(accion))
+
+        # Reglas de patrullaje: posiciÃ³n actual + ausencia de jugador
+        # adyacente + movimiento vÃ¡lido => siguiente acciÃ³n del ciclo.
+        # El desplazamiento se obtiene de los puntos de patrulla.
+        for i, actual in enumerate(self.PATRULLA):
+            destino = self.PATRULLA[(i + 1) % len(self.PATRULLA)]
+            delta = (destino[0] - actual[0], destino[1] - actual[1])
+            direccion = next(d for d, desplazamiento in ACCIONES.items()
+                             if desplazamiento == delta)
+            self.bc.decir((self._sentencia("SinJugadorAdyacente"),
+                        self._sentencia(self._posicion(actual)),
+                        self._sentencia(f"Valido_{direccion}")),
+                        self._sentencia(self.REGLAS[direccion][1]))
+
+    def _percibir(self, estado: EstadoJuego) -> list[str]:
+        gx, gy = estado.pos_agente
+        px, py = estado.pos_jugador
+        desplazamiento = (px - gx, py - gy)
+        return [self.REGLAS[d][0] for d, delta in ACCIONES.items()
+                if delta == desplazamiento]
+
+    def construir_sentencia_de_percepcion(self, estado: EstadoJuego,
+                                        validas: list[str]) -> list[str]:
+        """Convierte las observaciones actuales en hechos del tiempo t."""
+        percepciones = self._percibir(estado)
+        hechos = percepciones or ["SinJugadorAdyacente"]
+        hechos = hechos + [self._posicion(estado.pos_agente)]
+        hechos += [f"Valido_{direccion}" for direccion in validas]
+        return [self._sentencia(hecho) for hecho in hechos]
+
+    def pedir_accion(self, validas: list[str]) -> tuple[str, str, int]:
+        """PREGUNTAR quÃ© acciÃ³n del tiempo t se deduce de la BC."""
+        consultas = 0
+        for direccion, (_, accion) in self.REGLAS.items():
+            if direccion not in validas:
+                continue
+            consulta = self._sentencia(accion)
+            consultas += 1
+            if self.bc.preguntar(consulta):
+                return direccion, consulta, consultas
+        raise RuntimeError("La BC no dedujo un movimiento vÃ¡lido del guardiÃ¡n.")
+
+    def construir_sentencia_de_accion(self, accion: str) -> str:
+        return self._sentencia(f"AccionElegida_{accion}")
+
+    def elegir_movimiento(self, estado: EstadoJuego) -> str:
+        if estado.turno != "AGENTE":
+            raise ValueError("No es el turno del guardiÃ¡n.")
+        validas = movimientos_validos(estado, actor="AGENTE")
+        if not validas:
+            raise RuntimeError("No hay movimientos vÃ¡lidos para el guardiÃ¡n.")
+
+        # Preparar las clÃ¡usulas de Horn correspondientes al instante t.
+        self._registrar_reglas()
+
+        # 1. DECIR(BC, CONSTRUIR-SENTENCIA-DE-PERCEPCION(percepcion, t)).
+        hechos = self.construir_sentencia_de_percepcion(estado, validas)
+        for hecho in hechos:
+            self.bc.decir(hecho)
+
+        # 2. accion <- PREGUNTAR(BC, PEDIR-ACCION(t)).
+        movimiento, consulta, consultas = self.pedir_accion(validas)
+
+        # 3. DECIR(BC, CONSTRUIR-SENTENCIA-DE-ACCION(accion, t)).
+        sentencia_accion = self.construir_sentencia_de_accion(movimiento)
+        self.bc.decir(sentencia_accion)
+
+        # EstadÃ­sticas para el motor y la interfaz, sin intervenir en la decisiÃ³n.
+        percepciones = self._percibir(estado)
+        modo = "INFERENCIA" if percepciones else "PATRULLA"
+        gx, gy = estado.pos_agente
+        dx, dy = ACCIONES[movimiento]
+        self._estadisticas = {
+            "turno": estado.numero_turno,
+            "tiempo": self.t,
+            "modo": modo,
+            "percepciones": percepciones,
+            "hechos_actuales": hechos,
+            "inferencia": self.REGLAS[movimiento][1] if percepciones else None,
+            "consulta_accion": consulta,
+            "consultas": consultas,
+            "accion": movimiento,
+            "sentencia_accion": sentencia_accion,
+            "destino": (gx + dx, gy + dy),
+        }
+
+        # 4. t <- t + 1.
+        self.t += 1
+        # 5. return accion.
+        return movimiento
+
+    def obtener_estadisticas(self) -> dict[str, Any]:
+        resultado = dict(self._estadisticas)
+        for clave in ("percepciones", "hechos_actuales"):
+            if clave in resultado:
+                resultado[clave] = list(resultado[clave])
+        return resultado
+
+
+
+========================================
+ARCHIVO: agentes\__init__.py
+========================================
+
+
+========================================
+ARCHIVO: interfaz\consola_basica.py
+========================================
+from nucleo.estado import EstadoJuego, movimientos_validos
+from nucleo.mapa import ALTO, ANCHO
+from nucleo.motor import MotorJuego, ResultadoNivel
+
+TECLAS_A_ACCION = {
+    "w": "ARRIBA",
+    "s": "ABAJO",
+    "a": "IZQUIERDA",
+    "d": "DERECHA",
+}
+
+
+def renderizar_ascii(estado: EstadoJuego) -> str:
+    """Dibuja el tablero con y=10 arriba y y=1 abajo."""
+    lab = estado.laberinto
+    filas: list[str] = []
+    for y in range(ALTO, 0, -1):
+        celdas: list[str] = []
+        for x in range(1, ANCHO + 1):
+            pos = (x, y)
+            if pos == estado.pos_jugador and pos == estado.pos_agente:
+                celdas.append("X")  # Captura
+            elif pos == estado.pos_jugador:
+                celdas.append("P")
+            elif pos == estado.pos_agente:
+                celdas.append("G")
+            elif pos == lab.salida:
+                celdas.append("E")
+            elif pos in lab.obstaculos:
+                celdas.append("#")
+            else:
+                celdas.append(".")
+        filas.append(f"{y:2d} | " + " ".join(celdas))
+    filas.append("   +" + "--" * ANCHO)
+    filas.append("     " + " ".join(str(x) for x in range(1, ANCHO + 1)))
+    return "\n".join(filas)
+
+
+def ejecutar_en_consola(motor: MotorJuego) -> None:
+    while True:
+        print(f"\n=== NIVEL {motor.nivel_actual}/{motor.total_niveles}: {motor.estado.laberinto.nombre} ===")
+        print(f"Agente: {motor.agente_actual.nombre}")
+        print(f"Turno: {motor.estado.numero_turno} | P={motor.estado.pos_jugador} | G={motor.estado.pos_agente}")
+        print(renderizar_ascii(motor.estado))
+
+        validas = movimientos_validos(motor.estado, actor="HUMANO")
+        tecla = input(f"Mueve [W/A/S/D] (vÃ¡lidas: {validas}, Q para salir): ").strip().lower()
+        if tecla == "q":
+            print("Partida terminada por el usuario.")
+            return
+        accion_humano = TECLAS_A_ACCION.get(tecla)
+        if accion_humano not in validas:
+            print("Movimiento invÃ¡lido. Intenta de nuevo.")
+            continue
+
+        resultado = motor.ejecutar_turno_humano(accion_humano)
+        if resultado == ResultadoNivel.EN_CURSO:
+            accion_agente, resultado = motor.ejecutar_turno_agente()
+            stats = motor.agente_actual.obtener_estadisticas()
+            info_extra = f" | {stats}" if stats else ""
+            print(f"El agente se moviÃ³: {accion_agente}{info_extra}")
+
+        if resultado == ResultadoNivel.CAPTURA_AGENTE:
+            print(renderizar_ascii(motor.estado))
+            print(f"\nCapturado en el nivel {motor.nivel_actual}.")
+            reintentar = input("Â¿Reintentar nivel? [s/n]: ").strip().lower()
+            if reintentar == "s":
+                motor.iniciar_nivel(motor.indice_nivel)
+            else:
+                return
+        elif resultado == ResultadoNivel.VICTORIA_HUMANO:
+            print(renderizar_ascii(motor.estado))
+            print(f"\nNivel {motor.nivel_actual} superado.")
+            if not motor.avanzar_nivel():
+                print("\nÂ¡Felicidades! Completaste los 3 niveles consecutivos.")
+                return
+
+
+========================================
+ARCHIVO: interfaz\pygame_moria.py
+========================================
+"""Interfaz grÃ¡fica con PyGame. TemÃ¡tica: Las minas de Moria.
+
+Usa el motor del juego (nucleo/): no tiene reglas propias, solo lee el estado
+del MotorJuego y envÃ­a las acciones del jugador. Sirve para los 3 niveles.
+
+Todo el arte se dibuja por cÃ³digo (sin imÃ¡genes externas):
+  #  muro de piedra       .  piso de losas       E  puerta con luz
+  P  explorador con antorcha                      G  trasgo (agente)
+
+Ejecutar desde la raÃ­z del repo:  python main_grafico.py
+"""
+
+import math
+import random
+
+import pygame
+
+from nucleo.estado import movimientos_validos
+from nucleo.mapa import ANCHO as TAM
+from nucleo.motor import MotorJuego, ResultadoNivel
+
+CELDA = 56
+MARGEN_X = 40
+TOP = 110
+ANCHO = MARGEN_X * 2 + CELDA * TAM
+ALTO = TOP + CELDA * TAM + 175
+
+FONDO = (14, 12, 10)
+ORO = (214, 176, 86)
+ORO_OSC = (120, 96, 44)
+PERGAMINO = (226, 208, 166)
+ROJO_OJOS = (255, 40, 30)
+AZUL_CAPA = (96, 130, 182)
+
+OSCURIDAD = 80  # 0 = sin oscuridad, 255 = negro total
+
+
+def _mascara_luz(radio, maximo):
+    """CÃ­rculo cuyo valor alfa baja desde el centro; se resta a la oscuridad."""
+    s = pygame.Surface((radio * 2, radio * 2), pygame.SRCALPHA)
+    for i in range(radio, 0, -3):
+        a = int(maximo * (1 - i / radio) ** 0.8)
+        pygame.draw.circle(s, (255, 255, 255, a), (radio, radio), i)
+    return s
+
+
+def _brillo(radio, color):
+    """Resplandor cÃ¡lido para mezclar de forma aditiva."""
+    s = pygame.Surface((radio * 2, radio * 2))
+    s.fill((0, 0, 0))
+    for i in range(radio, 0, -3):
+        k = (1 - i / radio) ** 1.6
+        pygame.draw.circle(s, tuple(int(c * k) for c in color), (radio, radio), i)
+    return s
+
+
+class Interfaz:
+    def __init__(self):
+        pygame.init()
+        pygame.display.set_caption("Escape del laberinto - Las minas de Moria")
+        self.pantalla = pygame.display.set_mode((ANCHO, ALTO))
+        self.f_titulo = pygame.font.SysFont("georgia", 34, bold=True)
+        self.f_texto = pygame.font.SysFont("georgia", 20, bold=True)
+        self.f_peq = pygame.font.SysFont("georgia", 15, bold=True)
+        self.luz_activa = True
+
+        self._clave = None
+        self.fondo = None
+        self.antorchas = []
+
+        # efectos de luz precalculados
+        self.luz_jugador = [_mascara_luz(r, OSCURIDAD) for r in (190, 200, 212)]
+        self.luz_salida = _mascara_luz(120, int(OSCURIDAD * 0.85))
+        self.luz_antorcha = _mascara_luz(78, int(OSCURIDAD * 0.7))
+        self.brillo_jugador = _brillo(150, (70, 38, 10))
+        self.brillo_salida = _brillo(90, (90, 66, 20))
+        self.brillo_antorcha = _brillo(56, (60, 32, 8))
+
+    # ---- coordenadas: (1,1) abajo a la izquierda ---------------------
+    def rect(self, celda):
+        x, y = celda
+        return pygame.Rect(MARGEN_X + (x - 1) * CELDA,
+                           TOP + (TAM - y) * CELDA, CELDA, CELDA)
+
+    # ---- piezas de arte estÃ¡ticas ------------------------------------
+    @staticmethod
+    def _piso(s, r, rng):
+        v = rng.randint(-8, 8)
+        base = (44 + v, 40 + v, 36 + v)
+        pygame.draw.rect(s, base, r)
+        pygame.draw.line(s, (60 + v, 55 + v, 49 + v), (r.left + 1, r.top + 1), (r.right - 2, r.top + 1))
+        pygame.draw.line(s, (60 + v, 55 + v, 49 + v), (r.left + 1, r.top + 1), (r.left + 1, r.bottom - 2))
+        pygame.draw.rect(s, (30, 27, 23), r, 1)
+        for _ in range(7):
+            px, py = rng.randint(r.left + 3, r.right - 4), rng.randint(r.top + 3, r.bottom - 4)
+            d = rng.choice((-14, 10))
+            pygame.draw.rect(s, (base[0] + d, base[1] + d, base[2] + d), (px, py, 2, 2))
+        if rng.random() < 0.2:
+            x0, y0 = rng.randint(r.left + 8, r.right - 8), rng.randint(r.top + 8, r.bottom - 8)
+            pts = [(x0, y0), (x0 + rng.randint(-8, 8), y0 + rng.randint(4, 10)),
+                   (x0 + rng.randint(-12, 12), y0 + rng.randint(12, 20))]
+            pygame.draw.lines(s, (28, 25, 21), False, pts, 1)
+
+    @staticmethod
+    def _muro(s, r, rng):
+        w, h = r.width, r.height // 2
+        filas = [[(0, w // 2), (w // 2, w)],
+                 [(0, w // 4), (w // 4, 3 * w // 4), (3 * w // 4, w)]]
+        for i, ladrillos in enumerate(filas):
+            for x0, x1 in ladrillos:
+                v = rng.randint(-10, 10)
+                b = pygame.Rect(r.left + x0, r.top + i * h, x1 - x0, h)
+                pygame.draw.rect(s, (116 + v, 108 + v, 96 + v), b)
+                pygame.draw.line(s, (158 + v, 150 + v, 134 + v), b.topleft, (b.right - 1, b.top))
+                pygame.draw.line(s, (158 + v, 150 + v, 134 + v), b.topleft, (b.left, b.bottom - 1))
+                pygame.draw.line(s, (44, 40, 35), (b.left, b.bottom - 1), (b.right - 1, b.bottom - 1))
+                pygame.draw.line(s, (44, 40, 35), (b.right - 1, b.top), (b.right - 1, b.bottom - 1))
+        pygame.draw.rect(s, (22, 19, 16), r, 1)
+        if rng.random() < 0.5:  # musgo
+            for _ in range(5):
+                pygame.draw.rect(s, (62, 86, 46), (rng.randint(r.left + 2, r.right - 4),
+                                                    rng.randint(r.bottom - 14, r.bottom - 3), 3, 2))
+
+    @staticmethod
+    def _puerta(s, r):
+        cx, cy = r.center
+        marco = pygame.Rect(0, 0, 36, 44)
+        marco.midbottom = (cx, r.bottom - 4)
+        arco = pygame.Rect(marco.left, marco.top - 4, 36, 36)
+        pygame.draw.rect(s, (150, 140, 120), marco.inflate(8, 0))
+        pygame.draw.ellipse(s, (150, 140, 120), arco.inflate(8, 8))
+        pygame.draw.rect(s, (255, 214, 130), marco)
+        pygame.draw.ellipse(s, (255, 214, 130), arco)
+        pygame.draw.rect(s, (255, 244, 205), marco.inflate(-18, -8).move(0, 4))
+        pygame.draw.rect(s, (96, 88, 74), marco.inflate(8, 0), 2)
+
+    def _construir_fondo(self, lab):
+        s = pygame.Surface((ANCHO, ALTO))
+        for y in range(ALTO):  # fondo con degradado vertical
+            k = 1 - 0.5 * y / ALTO
+            pygame.draw.line(s, (int(22 * k), int(19 * k), int(16 * k)), (0, y), (ANCHO, y))
+
+        tablero = pygame.Rect(MARGEN_X, TOP, CELDA * TAM, CELDA * TAM)
+        s.set_clip(tablero)
+        for x in range(1, TAM + 1):
+            for y in range(1, TAM + 1):
+                self._piso(s, self.rect((x, y)), random.Random(x * 131 + y * 17))
+        sombra = pygame.Surface((CELDA, CELDA), pygame.SRCALPHA)
+        sombra.fill((0, 0, 0, 95))
+        for celda in lab.obstaculos:
+            s.blit(sombra, self.rect(celda).move(5, 5))
+        for celda in lab.obstaculos:
+            self._muro(s, self.rect(celda), random.Random(celda[0] * 53 + celda[1] * 7))
+        s.set_clip(None)
+
+        self._puerta(s, self.rect(lab.salida))
+
+        # antorchas de pared en algunos muros
+        self.antorchas = []
+        for (x, y) in sorted(lab.obstaculos):
+            if (x * 7 + y * 3) % 11 == 0 and len(self.antorchas) < 6:
+                c = self.rect((x, y)).center
+                pygame.draw.rect(s, (40, 30, 20), (c[0] - 3, c[1] - 2, 6, 12))
+                self.antorchas.append((c[0], c[1] - 6))
+
+        # marco de piedra alrededor del tablero
+        pygame.draw.rect(s, (70, 64, 56), tablero.inflate(26, 26), 13)
+        pygame.draw.rect(s, (28, 25, 21), tablero.inflate(26, 26), 2)
+        pygame.draw.rect(s, ORO_OSC, tablero.inflate(2, 2), 2)
+
+        # tÃ­tulo
+        for dx, dy, col in ((2, 2, (0, 0, 0)), (0, 0, ORO)):
+            img = self.f_titulo.render("LAS MINAS DE MORIA", True, col)
+            s.blit(img, img.get_rect(center=(ANCHO // 2 + dx, 34 + dy)))
+        return s
+
+    # ---- personajes --------------------------------------------------
+    @staticmethod
+    def _llama(p, x, y, t, escala=1.0, fase=0):
+        f = math.sin(t / 90 + fase)
+        h = (10 + 2 * f) * escala
+        w = 5 * escala
+        pygame.draw.polygon(p, (255, 140, 30), [(x - w, y), (x, y - h), (x + w, y), (x, y + 3 * escala)])
+        pygame.draw.polygon(p, (255, 220, 110), [(x - w / 2, y), (x, y - h * 0.6), (x + w / 2, y), (x, y + 2 * escala)])
+
+    def _explorador(self, p, centro, t):
+        cx, cy = centro
+        pygame.draw.ellipse(p, AZUL_CAPA, (cx - 19, cy - 11, 38, 25))
+        pygame.draw.ellipse(p, (24, 36, 60), (cx - 19, cy - 11, 38, 25), 3)
+        pygame.draw.circle(p, (70, 98, 146), (cx, cy - 2), 11)
+        pygame.draw.circle(p, (226, 190, 152), (cx, cy - 3), 6)
+        pygame.draw.circle(p, (24, 36, 60), (cx, cy - 2), 11, 2)
+        pygame.draw.line(p, (96, 64, 30), (cx + 12, cy - 2), (cx + 15, cy - 14), 3)  # antorcha
+        self._llama(p, cx + 15, cy - 15, t)
+
+    @staticmethod
+    def _trasgo(p, centro, solo_ojos=False):
+        cx, cy = centro
+        if not solo_ojos:
+            verde = (86, 112, 62)
+            pygame.draw.polygon(p, verde, [(cx - 12, cy - 4), (cx - 25, cy - 12), (cx - 11, cy + 4)])
+            pygame.draw.polygon(p, verde, [(cx + 12, cy - 4), (cx + 25, cy - 12), (cx + 11, cy + 4)])
+            pygame.draw.circle(p, verde, (cx, cy), 15)
+            pygame.draw.circle(p, (40, 56, 28), (cx, cy), 15, 2)
+            pygame.draw.polygon(p, (40, 56, 28), [(cx - 9, cy - 8), (cx - 2, cy - 5), (cx - 9, cy - 4)])
+            pygame.draw.polygon(p, (40, 56, 28), [(cx + 9, cy - 8), (cx + 2, cy - 5), (cx + 9, cy - 4)])
+            pygame.draw.polygon(p, (230, 230, 210), [(cx - 6, cy + 6), (cx - 3, cy + 11), (cx, cy + 6)])
+            pygame.draw.polygon(p, (230, 230, 210), [(cx + 6, cy + 6), (cx + 3, cy + 11), (cx, cy + 6)])
+        pygame.draw.circle(p, (120, 10, 8), (cx - 6, cy - 2), 5)
+        pygame.draw.circle(p, (120, 10, 8), (cx + 6, cy - 2), 5)
+        pygame.draw.circle(p, ROJO_OJOS, (cx - 6, cy - 2), 3)
+        pygame.draw.circle(p, ROJO_OJOS, (cx + 6, cy - 2), 3)
+
+    # ---- texto -------------------------------------------------------
+    def _texto(self, fuente, texto, color, centro=None, izq=None):
+        img = fuente.render(texto, True, color)
+        r = img.get_rect()
+        if centro:
+            r.center = centro
+        if izq:
+            r.midleft = izq
+        self.pantalla.blit(img, r)
+
+    # ---- dibujo por cuadro -------------------------------------------
+    def dibujar(self, motor, mensaje, mostrar_ruta=False):
+        estado = motor.estado
+        lab = estado.laberinto
+        resultado = motor.evaluar_resultado()
+        clave = (lab.obstaculos, lab.salida)
+        if clave != self._clave:
+            self.fondo = self._construir_fondo(lab)
+            self._clave = clave
+
+        t = pygame.time.get_ticks()
+        p = self.pantalla
+        p.blit(self.fondo, (0, 0))
+        self._texto(self.f_texto, lab.nombre, PERGAMINO, centro=(ANCHO // 2, 76))
+
+        # ruta que calculÃ³ el agente en su Ãºltimo turno (si la expone): brasas
+        if mostrar_ruta:
+            ruta = getattr(motor.agente_actual, "ultima_ruta", None) or []
+            for celda in ruta:
+                if celda in (estado.pos_agente, estado.pos_jugador):
+                    continue
+                c = self.rect(celda).center
+                pygame.draw.circle(p, (120, 80, 20), c, 7)
+                pygame.draw.circle(p, (255, 200, 80), c, 4)
+
+        # personajes y llamas de pared
+        for (ax, ay) in self.antorchas:
+            self._llama(p, ax, ay, t, 0.9, ax)
+        pc = self.rect(estado.pos_jugador).center
+        ac = self.rect(estado.pos_agente).center
+        self._trasgo(p, ac)
+        self._explorador(p, pc, t)
+
+        # luz y oscuridad solo sobre el tablero
+        if self.luz_activa:
+            tablero = pygame.Rect(MARGEN_X, TOP, CELDA * TAM, CELDA * TAM)
+            osc = pygame.Surface(tablero.size, pygame.SRCALPHA)
+            osc.fill((0, 0, 0, OSCURIDAD))
+            fuentes = [(self.rect(lab.salida).center, self.luz_salida)]
+            fuentes += [(a, self.luz_antorcha) for a in self.antorchas]
+            idx = (0, 1, 2, 1)[(t // 120) % 4]
+            fuentes.append((pc, self.luz_jugador[idx]))
+            for (cx, cy), mascara in fuentes:
+                r = mascara.get_rect(center=(cx - tablero.left, cy - tablero.top))
+                osc.blit(mascara, r, special_flags=pygame.BLEND_RGBA_SUB)
+            p.blit(osc, tablero.topleft)
+
+            p.set_clip(tablero)
+            for (cx, cy), brillo in ([(self.rect(lab.salida).center, self.brillo_salida)]
+                                     + [(a, self.brillo_antorcha) for a in self.antorchas]
+                                     + [(pc, self.brillo_jugador)]):
+                p.blit(brillo, brillo.get_rect(center=(cx, cy)), special_flags=pygame.BLEND_RGB_ADD)
+            p.set_clip(None)
+            self._trasgo(p, ac, solo_ojos=True)   # los ojos se ven aun en la oscuridad
+            self._llama(p, pc[0] + 15, pc[1] - 15, t)
+
+        # etiquetas de la convenciÃ³n del enunciado: P, G, E
+        self._texto(self.f_peq, "P", (200, 220, 255), centro=(pc[0] - 17, pc[1] + 20))
+        self._texto(self.f_peq, "G", (255, 150, 130), centro=(ac[0] - 17, ac[1] + 20))
+        er = self.rect(lab.salida)
+        self._texto(self.f_peq, "E", (60, 40, 10), centro=(er.centerx, er.bottom - 16))
+
+        self._hud(motor, mensaje)
+        if resultado != ResultadoNivel.EN_CURSO:
+            self._final(motor, resultado)
+        pygame.display.flip()
+
+    def _hud(self, motor, mensaje):
+        estado = motor.estado
+        agente = motor.agente_actual
+        y0 = TOP + CELDA * TAM + 30
+        p = self.pantalla
+        panel = pygame.Rect(MARGEN_X - 6, y0 - 12, CELDA * TAM + 12, 138)
+        pygame.draw.rect(p, (34, 30, 26), panel)
+        pygame.draw.rect(p, (70, 64, 56), panel, 4)
+        pygame.draw.rect(p, ORO_OSC, panel.inflate(-10, -10), 1)
+        x = MARGEN_X + 10
+        self._texto(self.f_texto, f"NIVEL {motor.nivel_actual}/{motor.total_niveles}   TURNO {estado.numero_turno}",
+                    ORO, izq=(x, y0 + 8))
+        self._texto(self.f_texto, f"P {estado.pos_jugador}   G {estado.pos_agente}", PERGAMINO,
+                    izq=(x + 300, y0 + 8))
+        self._texto(self.f_texto, mensaje, PERGAMINO, izq=(x, y0 + 36))
+
+        # mÃ©tricas del agente (nodos explorados, modo, etc.), si las reporta
+        stats = agente.obtener_estadisticas()
+        detalle = ", ".join(f"{k}: {v}" for k, v in stats.items())
+        linea = f"{agente.nombre}" + (f"  |  {detalle}" if detalle else "")
+        if len(linea) > 68:
+            linea = linea[:67] + "..."
+        self._texto(self.f_peq, linea, ORO, izq=(x, y0 + 64))
+        self._texto(self.f_peq, "P explorador   G trasgo (agente)   E salida   # muro", ORO_OSC, izq=(x, y0 + 86))
+        self._texto(self.f_peq, "WASD/flechas mover  H ruta  L luz  R reintentar  Esc salir", ORO_OSC,
+                    izq=(x, y0 + 106))
+
+    def _final(self, motor, resultado):
+        p = self.pantalla
+        cy = TOP + CELDA * TAM // 2
+        velo = pygame.Surface((ANCHO, 150))
+        velo.set_alpha(215)
+        velo.fill((8, 6, 4))
+        p.blit(velo, (0, cy - 75))
+        pygame.draw.line(p, ORO_OSC, (MARGEN_X, cy - 75), (ANCHO - MARGEN_X, cy - 75), 2)
+        pygame.draw.line(p, ORO_OSC, (MARGEN_X, cy + 75), (ANCHO - MARGEN_X, cy + 75), 2)
+        if resultado == ResultadoNivel.CAPTURA_AGENTE:
+            self._texto(self.f_titulo, "TE ATRAPARON", (230, 70, 55), centro=(ANCHO // 2, cy - 18))
+            self._texto(self.f_texto, "R: reintentar el nivel", PERGAMINO, centro=(ANCHO // 2, cy + 30))
+        elif motor.indice_nivel + 1 < motor.total_niveles:
+            self._texto(self.f_titulo, "NIVEL SUPERADO", ORO, centro=(ANCHO // 2, cy - 18))
+            self._texto(self.f_texto, "ENTER: siguiente nivel", PERGAMINO, centro=(ANCHO // 2, cy + 30))
+        else:
+            self._texto(self.f_titulo, "HAS ESCAPADO DE MORIA", ORO, centro=(ANCHO // 2, cy - 18))
+            self._texto(self.f_texto, "Completaste los 3 niveles   (R: repetir este nivel, Esc: salir)",
+                        PERGAMINO, centro=(ANCHO // 2, cy + 30))
+
+
+# ======================================================================
+# Ciclo principal: conecta teclado -> MotorJuego -> dibujo
+# ======================================================================
+RETARDO_AGENTE_MS = 350  # pausa para que se vea cada turno del agente
+
+TECLAS = {
+    pygame.K_UP: "ARRIBA", pygame.K_w: "ARRIBA",
+    pygame.K_DOWN: "ABAJO", pygame.K_s: "ABAJO",
+    pygame.K_LEFT: "IZQUIERDA", pygame.K_a: "IZQUIERDA",
+    pygame.K_RIGHT: "DERECHA", pygame.K_d: "DERECHA",
+}
+
+
+def ejecutar_en_pygame(motor: MotorJuego) -> None:
+    """Equivalente grÃ¡fico de interfaz.consola_basica.ejecutar_en_consola."""
+    interfaz = Interfaz()
+    reloj = pygame.time.Clock()
+    mostrar_ruta = False
+    mensaje = "Tu turno."
+    mover_agente_en = None  # instante (ms) en que el agente ejecuta su turno
+
+    while True:
+        for evento in pygame.event.get():
+            if evento.type == pygame.QUIT:
+                pygame.quit()
+                return
+            if evento.type != pygame.KEYDOWN:
+                continue
+
+            if evento.key == pygame.K_ESCAPE:
+                pygame.quit()
+                return
+            elif evento.key == pygame.K_h:
+                mostrar_ruta = not mostrar_ruta
+            elif evento.key == pygame.K_l:
+                interfaz.luz_activa = not interfaz.luz_activa
+            elif evento.key == pygame.K_r:
+                motor.iniciar_nivel(motor.indice_nivel)
+                mover_agente_en = None
+                mensaje = "Nivel reiniciado. Tu turno."
+            elif evento.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+                if motor.evaluar_resultado() == ResultadoNivel.VICTORIA_HUMANO and motor.avanzar_nivel():
+                    mensaje = "Nuevo nivel. Tu turno."
+            elif evento.key in TECLAS:
+                en_curso = motor.evaluar_resultado() == ResultadoNivel.EN_CURSO
+                if not en_curso or mover_agente_en is not None or motor.estado.turno != "HUMANO":
+                    continue
+                accion = TECLAS[evento.key]
+                if accion not in movimientos_validos(motor.estado, actor="HUMANO"):
+                    mensaje = "Movimiento no permitido."
+                    continue
+                resultado = motor.ejecutar_turno_humano(accion)
+                mensaje = f"Jugador -> {accion} {motor.estado.pos_jugador}"
+                if resultado == ResultadoNivel.EN_CURSO:
+                    mover_agente_en = pygame.time.get_ticks() + RETARDO_AGENTE_MS
+
+        # turno del agente despuÃ©s de la pausa
+        if mover_agente_en is not None and pygame.time.get_ticks() >= mover_agente_en:
+            accion, resultado = motor.ejecutar_turno_agente()
+            mensaje = f"Agente -> {accion} {motor.estado.pos_agente}"
+            mover_agente_en = None
+
+        interfaz.dibujar(motor, mensaje, mostrar_ruta)
+        reloj.tick(30)
+
+
+
+========================================
+ARCHIVO: interfaz\__init__.py
+========================================
+
+
+========================================
+ARCHIVO: mapas\nivel1.txt
+========================================
+....#..G.E
+.....#....
+..#.......
+......#...
+...#......
+.....##...
+..##......
+......#...
+...#..#...
+P..#......
+
+
+
+========================================
+ARCHIVO: mapas\nivel2.txt
+========================================
+......G..E
+.##...#...
+...#..#...
+.#.#......
+.#...##...
+...#......
+##.#.###..
+...#......
+.##..#..#.
+P....#....
+
+
+
+========================================
+ARCHIVO: mapas\nivel3.txt
+========================================
+......#..E
+......#G..
+....#.....
+......#...
+...#......
+.....#....
+.##..#....
+.....#....
+..##......
+P.........
+
+
+
+========================================
+ARCHIVO: nucleo\agente_base.py
+========================================
+from abc import ABC, abstractmethod
+import random
+from typing import Any
+
+from nucleo.estado import EstadoJuego, movimientos_validos
+
+
+class AgenteBase(ABC):
+    """
+    Contrato comÃºn que deben heredar los agentes de los 3 niveles
+    (Integrantes 2, 3 y 5).
+    """
+
+    def __init__(self, nombre: str) -> None:
+        self.nombre = nombre
+
+    @abstractmethod
+    def elegir_movimiento(self, estado: EstadoJuego) -> str:
+        """
+        Recibe el EstadoJuego actual (con turno == 'AGENTE') y devuelve
+        una acciÃ³n vÃ¡lida: 'ARRIBA', 'ABAJO', 'IZQUIERDA' o 'DERECHA'.
+        Debe ejecutarse en vivo durante la partida (sin rutas precalculadas).
+        """
+
+    def reiniciar(self) -> None:
+        """Restablece el estado interno del agente al iniciar o reintentar un nivel."""
+
+    def obtener_estadisticas(self) -> dict[str, Any]:
+        """Devuelve mÃ©tricas del Ãºltimo turno (nodos explorados, modo patrulla/inferencia, etc.)."""
+        return {}
+
+
+class AgenteAleatorio(AgenteBase):
+    """Agente de prueba para validar el motor antes de integrar los mÃ³dulos de IA."""
+
+    def __init__(self, semilla: int | None = None) -> None:
+        super().__init__(nombre="Agente de Prueba (Aleatorio)")
+        self._rng = random.Random(semilla)
+
+    def elegir_movimiento(self, estado: EstadoJuego) -> str:
+        opciones = movimientos_validos(estado, actor="AGENTE")
+        if not opciones:
+            raise RuntimeError("El agente no tiene movimientos vÃ¡lidos disponibles.")
+        return self._rng.choice(opciones)
+
+
+========================================
+ARCHIVO: nucleo\estado.py
+========================================
+from dataclasses import dataclass
+from typing import Literal
+
+from nucleo.mapa import ACCIONES, Laberinto, Posicion
+
+Actor = Literal["HUMANO", "AGENTE"]
+
+
+@dataclass(frozen=True)
+class EstadoJuego:
+    """
+    Estado completo e inmutable de una partida en un instante dado.
+    Compatible con bÃºsqueda en grafos (Tema 3) y bÃºsqueda adversarial (Minimax).
+    """
+
+    laberinto: Laberinto
+    pos_jugador: Posicion
+    pos_agente: Posicion
+    turno: Actor = "HUMANO"  # Regla 5: el jugador humano siempre mueve primero
+    numero_turno: int = 1
+
+
+def estado_inicial(laberinto: Laberinto) -> EstadoJuego:
+    """Construye el estado inicial de un nivel."""
+    return EstadoJuego(
+        laberinto=laberinto,
+        pos_jugador=laberinto.inicio_jugador,
+        pos_agente=laberinto.inicio_agente,
+        turno="HUMANO",
+        numero_turno=1,
+    )
+
+
+def es_captura(estado: EstadoJuego) -> bool:
+    """El agente gana cuando ocupa la misma celda que el jugador."""
+    return estado.pos_jugador == estado.pos_agente
+
+
+def es_escape(estado: EstadoJuego) -> bool:
+    """El jugador gana al alcanzar la salida (10, 10) sin ser capturado."""
+    return estado.pos_jugador == estado.laberinto.salida and not es_captura(estado)
+
+
+def test_terminal(estado: EstadoJuego) -> bool:
+    """TEST_TERMINAL(estado) para Minimax (Algoritmos 10 y 11, Tema 3) y el motor."""
+    return es_captura(estado) or es_escape(estado)
+
+
+def movimientos_validos(estado: EstadoJuego, actor: Actor | None = None) -> list[str]:
+    """Devuelve la lista de acciones vÃ¡lidas para el actor indicado (o el del turno actual)."""
+    if test_terminal(estado):
+        return []
+    quien = actor or estado.turno
+    pos_actual = estado.pos_jugador if quien == "HUMANO" else estado.pos_agente
+    return [accion for accion, _ in estado.laberinto.vecinos(pos_actual)]
+
+
+def aplicar_movimiento(estado: EstadoJuego, accion: str) -> EstadoJuego:
+    """
+    Aplica una acciÃ³n vÃ¡lida al actor en turno y devuelve un NUEVO EstadoJuego.
+    """
+    if test_terminal(estado):
+        raise ValueError("No se pueden aplicar movimientos sobre un estado terminal.")
+    if accion not in ACCIONES:
+        raise ValueError(f"AcciÃ³n desconocida: '{accion}'. VÃ¡lidas: {list(ACCIONES.keys())}")
+
+    dx, dy = ACCIONES[accion]
+    if estado.turno == "HUMANO":
+        nueva_pos = (estado.pos_jugador[0] + dx, estado.pos_jugador[1] + dy)
+        if not estado.laberinto.es_transitable(nueva_pos):
+            raise ValueError(f"Movimiento invÃ¡lido '{accion}' para HUMANO hacia {nueva_pos}.")
+        return EstadoJuego(
+            laberinto=estado.laberinto,
+            pos_jugador=nueva_pos,
+            pos_agente=estado.pos_agente,
+            turno="AGENTE",
+            numero_turno=estado.numero_turno,
+        )
+
+    nueva_pos = (estado.pos_agente[0] + dx, estado.pos_agente[1] + dy)
+    if not estado.laberinto.es_transitable(nueva_pos):
+        raise ValueError(f"Movimiento invÃ¡lido '{accion}' para AGENTE hacia {nueva_pos}.")
+    return EstadoJuego(
+        laberinto=estado.laberinto,
+        pos_jugador=estado.pos_jugador,
+        pos_agente=nueva_pos,
+        turno="HUMANO",
+        numero_turno=estado.numero_turno + 1,
+    )
+
+
+def sucesores(estado: EstadoJuego) -> list[tuple[str, EstadoJuego]]:
+    """
+    FunciÃ³n SUCESORES(estado) del Tema 3.
+    Devuelve pares (accion, nuevo_estado) para el actor al que le corresponde mover.
+    """
+    return [(accion, aplicar_movimiento(estado, accion)) for accion in movimientos_validos(estado)]
+
+
+========================================
+ARCHIVO: nucleo\mapa.py
+========================================
+from dataclasses import dataclass
+from pathlib import Path
+
+ANCHO = 10
+ALTO = 10
+
+SIMBOLO_JUGADOR = "P"
+SIMBOLO_AGENTE = "G"
+SIMBOLO_SALIDA = "E"
+SIMBOLO_OBSTACULO = "#"
+SIMBOLO_LIBRE = "."
+SIMBOLOS_VALIDOS = {
+    SIMBOLO_JUGADOR,
+    SIMBOLO_AGENTE,
+    SIMBOLO_SALIDA,
+    SIMBOLO_OBSTACULO,
+    SIMBOLO_LIBRE,
+}
+
+# Movimientos ortogonales en coordenadas cartesianas (x, y)
+ACCIONES: dict[str, tuple[int, int]] = {
+    "ARRIBA": (0, 1),
+    "ABAJO": (0, -1),
+    "IZQUIERDA": (-1, 0),
+    "DERECHA": (1, 0),
+}
+
+Posicion = tuple[int, int]
+
+
+@dataclass(frozen=True)
+class Laberinto:
+    """RepresentaciÃ³n inmutable de un escenario 10x10 del juego."""
+
+    nombre: str
+    obstaculos: frozenset[Posicion]
+    inicio_jugador: Posicion
+    inicio_agente: Posicion
+    salida: Posicion
+    ancho: int = ANCHO
+    alto: int = ALTO
+
+    def en_limites(self, pos: Posicion) -> bool:
+        x, y = pos
+        return 1 <= x <= self.ancho and 1 <= y <= self.alto
+
+    def es_transitable(self, pos: Posicion) -> bool:
+        return self.en_limites(pos) and pos not in self.obstaculos
+
+    def vecinos(self, pos: Posicion) -> list[tuple[str, Posicion]]:
+        """Devuelve pares (accion, nueva_pos) transitables desde pos."""
+        x, y = pos
+        resultado: list[tuple[str, Posicion]] = []
+        for accion, (dx, dy) in ACCIONES.items():
+            siguiente = (x + dx, y + dy)
+            if self.es_transitable(siguiente):
+                resultado.append((accion, siguiente))
+        return resultado
+
+
+def distancia_manhattan(a: Posicion, b: Posicion) -> int:
+    """HeurÃ­stica Manhattan requerida en el Nivel 1 y Ãºtil en el Nivel 2."""
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+
+def cargar_laberinto_desde_texto(texto: str, nombre: str = "Nivel") -> Laberinto:
+    """
+    Convierte una cuadrÃ­cula de texto de 10x10 a un objeto Laberinto.
+    La primera lÃ­nea del texto corresponde a y = 10 y la Ãºltima a y = 1.
+    """
+    lineas = [linea.strip() for linea in texto.strip().splitlines() if linea.strip()]
+    if len(lineas) != ALTO:
+        raise ValueError(f"{nombre}: se esperaban {ALTO} filas y se encontraron {len(lineas)}.")
+
+    obstaculos: set[Posicion] = set()
+    inicio_jugador: Posicion | None = None
+    inicio_agente: Posicion | None = None
+    salida: Posicion | None = None
+
+    for fila_idx, linea in enumerate(lineas):
+        if len(linea) != ANCHO:
+            raise ValueError(
+                f"{nombre}: la fila {fila_idx + 1} tiene {len(linea)} columnas (deben ser {ANCHO})."
+            )
+        y = ALTO - fila_idx  # fila 0 -> y=10 (arriba), fila 9 -> y=1 (abajo)
+        for col_idx, simbolo in enumerate(linea):
+            if simbolo not in SIMBOLOS_VALIDOS:
+                raise ValueError(f"{nombre}: sÃ­mbolo invÃ¡lido '{simbolo}' en fila {fila_idx + 1}.")
+            x = col_idx + 1  # col 0 -> x=1 (izquierda), col 9 -> x=10 (derecha)
+            pos = (x, y)
+
+            if simbolo == SIMBOLO_OBSTACULO:
+                obstaculos.add(pos)
+            elif simbolo == SIMBOLO_JUGADOR:
+                if inicio_jugador is not None:
+                    raise ValueError(f"{nombre}: hay mÃ¡s de un jugador 'P'.")
+                inicio_jugador = pos
+            elif simbolo == SIMBOLO_AGENTE:
+                if inicio_agente is not None:
+                    raise ValueError(f"{nombre}: hay mÃ¡s de un agente 'G'.")
+                inicio_agente = pos
+            elif simbolo == SIMBOLO_SALIDA:
+                if salida is not None:
+                    raise ValueError(f"{nombre}: hay mÃ¡s de una salida 'E'.")
+                salida = pos
+
+    if inicio_jugador != (1, 1):
+        raise ValueError(f"{nombre}: el jugador 'P' debe iniciar en (1, 1), encontrado en {inicio_jugador}.")
+    if salida != (10, 10):
+        raise ValueError(f"{nombre}: la salida 'E' debe estar en (10, 10), encontrada en {salida}.")
+    if inicio_agente is None:
+        raise ValueError(f"{nombre}: no se encontrÃ³ la posiciÃ³n inicial del agente 'G'.")
+
+    return Laberinto(
+        nombre=nombre,
+        obstaculos=frozenset(obstaculos),
+        inicio_jugador=inicio_jugador,
+        inicio_agente=inicio_agente,
+        salida=salida,
+    )
+
+
+def cargar_laberinto_desde_archivo(ruta: str | Path, nombre: str | None = None) -> Laberinto:
+    path = Path(ruta)
+    contenido = path.read_text(encoding="utf-8")
+    return cargar_laberinto_desde_texto(contenido, nombre=nombre or path.stem)
+
+
+========================================
+ARCHIVO: nucleo\motor.py
+========================================
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+
+from nucleo.agente_base import AgenteBase
+from nucleo.estado import (
+    EstadoJuego,
+    aplicar_movimiento,
+    es_captura,
+    es_escape,
+    estado_inicial,
+    movimientos_validos,
+)
+from nucleo.mapa import Laberinto
+
+
+class ResultadoNivel(Enum):
+    EN_CURSO = "EN_CURSO"
+    VICTORIA_HUMANO = "VICTORIA_HUMANO"
+    CAPTURA_AGENTE = "CAPTURA_AGENTE"
+
+
+@dataclass
+class RegistroMovimiento:
+    nivel: int
+    numero_turno: int
+    actor: str
+    accion: str
+    pos_jugador: tuple[int, int]
+    pos_agente: tuple[int, int]
+    estadisticas_agente: dict[str, Any]
+
+
+class MotorJuego:
+    """Gestiona los 3 niveles consecutivos, el ciclo de turnos y el historial."""
+
+    def __init__(self, niveles: list[tuple[Laberinto, AgenteBase]]) -> None:
+        if not niveles:
+            raise ValueError("Debe proporcionarse al menos un nivel.")
+        self.niveles = niveles
+        self.indice_nivel: int = 0
+        self.estado: EstadoJuego = estado_inicial(self.niveles[0][0])
+        self.historial: list[RegistroMovimiento] = []
+        self.iniciar_nivel(0)
+
+    @property
+    def nivel_actual(self) -> int:
+        return self.indice_nivel + 1
+
+    @property
+    def total_niveles(self) -> int:
+        return len(self.niveles)
+
+    @property
+    def agente_actual(self) -> AgenteBase:
+        return self.niveles[self.indice_nivel][1]
+
+    def iniciar_nivel(self, indice: int) -> EstadoJuego:
+        if not (0 <= indice < len(self.niveles)):
+            raise IndexError(f"Ãndice de nivel fuera de rango: {indice}")
+        self.indice_nivel = indice
+        laberinto, agente = self.niveles[indice]
+        agente.reiniciar()
+        self.estado = estado_inicial(laberinto)
+        return self.estado
+
+    def evaluar_resultado(self) -> ResultadoNivel:
+        if es_captura(self.estado):
+            return ResultadoNivel.CAPTURA_AGENTE
+        if es_escape(self.estado):
+            return ResultadoNivel.VICTORIA_HUMANO
+        return ResultadoNivel.EN_CURSO
+
+    def ejecutar_turno_humano(self, accion: str) -> ResultadoNivel:
+        if self.estado.turno != "HUMANO":
+            raise RuntimeError("No es el turno del jugador humano.")
+        if self.evaluar_resultado() != ResultadoNivel.EN_CURSO:
+            raise RuntimeError("El nivel actual ya terminÃ³.")
+
+        self.estado = aplicar_movimiento(self.estado, accion)
+        self.historial.append(
+            RegistroMovimiento(
+                nivel=self.nivel_actual,
+                numero_turno=self.estado.numero_turno,
+                actor="HUMANO",
+                accion=accion,
+                pos_jugador=self.estado.pos_jugador,
+                pos_agente=self.estado.pos_agente,
+                estadisticas_agente={},
+            )
+        )
+        return self.evaluar_resultado()
+
+    def ejecutar_turno_agente(self) -> tuple[str, ResultadoNivel]:
+        if self.estado.turno != "AGENTE":
+            raise RuntimeError("No es el turno del agente.")
+        if self.evaluar_resultado() != ResultadoNivel.EN_CURSO:
+            raise RuntimeError("El nivel actual ya terminÃ³.")
+
+        agente = self.agente_actual
+        accion = agente.elegir_movimiento(self.estado)
+        validas = movimientos_validos(self.estado, actor="AGENTE")
+        if accion not in validas:
+            raise ValueError(
+                f"El agente '{agente.nombre}' devolviÃ³ '{accion}', pero las vÃ¡lidas son {validas}."
+            )
+
+        turno_previo = self.estado.numero_turno
+        self.estado = aplicar_movimiento(self.estado, accion)
+        self.historial.append(
+            RegistroMovimiento(
+                nivel=self.nivel_actual,
+                numero_turno=turno_previo,
+                actor="AGENTE",
+                accion=accion,
+                pos_jugador=self.estado.pos_jugador,
+                pos_agente=self.estado.pos_agente,
+                estadisticas_agente=agente.obtener_estadisticas(),
+            )
+        )
+        return accion, self.evaluar_resultado()
+
+    def avanzar_nivel(self) -> bool:
+        """
+        Avanza al siguiente nivel si quedan pendientes.
+        Devuelve True si iniciÃ³ el siguiente nivel; False si se completaron los 3.
+        """
+        if self.evaluar_resultado() != ResultadoNivel.VICTORIA_HUMANO:
+            raise RuntimeError("Solo se puede avanzar tras ganar el nivel actual.")
+        if self.indice_nivel + 1 >= len(self.niveles):
+            return False
+        self.iniciar_nivel(self.indice_nivel + 1)
+        return True
+
+
+========================================
+ARCHIVO: nucleo\__init__.py
+========================================
+
+
+========================================
+ARCHIVO: pruebas\test_motor.py
+========================================
+import unittest
+
+from nucleo.agente_base import AgenteBase
+from nucleo.estado import (
+    EstadoJuego,
+    aplicar_movimiento,
+    es_captura,
+    es_escape,
+    estado_inicial,
+    sucesores,
+)
+from nucleo.mapa import cargar_laberinto_desde_texto
+from nucleo.motor import MotorJuego, ResultadoNivel
+
+MAPA_PRUEBA = """
+.........E
+........G.
+..........
+..........
+..........
+..........
+..........
+..........
+.#........
+P.........
+"""
+
+
+class AgenteFijo(AgenteBase):
+    def __init__(self, acciones: list[str]) -> None:
+        super().__init__(nombre="AgenteFijo")
+        self._acciones = list(acciones)
+        self._i = 0
+
+    def elegir_movimiento(self, estado: EstadoJuego) -> str:
+        accion = self._acciones[self._i % len(self._acciones)]
+        self._i += 1
+        return accion
+
+    def reiniciar(self) -> None:
+        self._i = 0
+
+
+class TestMotorJuego(unittest.TestCase):
+    def setUp(self) -> None:
+        self.lab = cargar_laberinto_desde_texto(MAPA_PRUEBA, "MapaPrueba")
+
+    def test_coordenadas_cartesianas(self) -> None:
+        self.assertEqual(self.lab.inicio_jugador, (1, 1))
+        self.assertEqual(self.lab.salida, (10, 10))
+        self.assertEqual(self.lab.inicio_agente, (9, 9))
+        self.assertIn((2, 2), self.lab.obstaculos)
+
+    def test_inmutabilidad_y_sucesores(self) -> None:
+        inicial = estado_inicial(self.lab)
+        hijos = dict(sucesores(inicial))
+        self.assertIn("ARRIBA", hijos)
+        self.assertIn("DERECHA", hijos)
+        self.assertNotIn("ABAJO", hijos)
+        self.assertNotIn("IZQUIERDA", hijos)
+        self.assertEqual(inicial.pos_jugador, (1, 1))  # No mutado
+        self.assertEqual(hijos["ARRIBA"].pos_jugador, (1, 2))
+        self.assertEqual(hijos["ARRIBA"].turno, "AGENTE")
+
+    def test_bloqueo_obstaculo(self) -> None:
+        e1 = aplicar_movimiento(estado_inicial(self.lab), "ARRIBA")  # P en (1, 2)
+        e2 = aplicar_movimiento(e1, "IZQUIERDA")  # G en (8, 9), turno HUMANO
+        with self.assertRaises(ValueError):
+            aplicar_movimiento(e2, "DERECHA")  # (2, 2) es '#'
+
+    def test_escape_y_captura(self) -> None:
+        cerca_salida = EstadoJuego(self.lab, pos_jugador=(9, 10), pos_agente=(5, 5), turno="HUMANO")
+        escapo = aplicar_movimiento(cerca_salida, "DERECHA")
+        self.assertTrue(es_escape(escapo))
+        self.assertFalse(es_captura(escapo))
+
+        cerca_agente = EstadoJuego(self.lab, pos_jugador=(5, 5), pos_agente=(5, 6), turno="AGENTE")
+        capturado = aplicar_movimiento(cerca_agente, "ABAJO")
+        self.assertTrue(es_captura(capturado))
+        self.assertFalse(es_escape(capturado))
+
+    def test_flujo_motor_turnos(self) -> None:
+        motor = MotorJuego([(self.lab, AgenteFijo(["IZQUIERDA"]))])
+        res_h = motor.ejecutar_turno_humano("DERECHA")
+        self.assertEqual(res_h, ResultadoNivel.EN_CURSO)
+        self.assertEqual(motor.estado.pos_jugador, (2, 1))
+        accion_a, res_a = motor.ejecutar_turno_agente()
+        self.assertEqual(accion_a, "IZQUIERDA")
+        self.assertEqual(res_a, ResultadoNivel.EN_CURSO)
+        self.assertEqual(motor.estado.pos_agente, (8, 9))
+        self.assertEqual(motor.estado.numero_turno, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+========================================
+ARCHIVO: pruebas\test_motor_logico.py
+========================================
+"""Pruebas del motor proposicional â€” integrante 4.
+
+Ejecutar desde la raÃ­z del repositorio:
+    python -m unittest discover -s pruebas -v
+"""
+
+import unittest
+
+from agentes.motor_logico import BaseConocimiento, ReglaHorn, crear_base_para_turno
+
+
+class TestMotorLogico(unittest.TestCase):
+    def test_ejemplo_del_tema4(self):
+        bc = BaseConocimiento(hechos=("A", "B", "E"))
+        bc.agregar_regla(("A", "B"), "C")
+        bc.agregar_regla(("C",), "D")
+        bc.agregar_regla(("B", "E"), "F")
+        bc.agregar_regla(("D", "F"), "G")
+        self.assertTrue(bc.preguntar("G"))
+        self.assertEqual(bc.inferir_todos(), {"A", "B", "C", "D", "E", "F", "G"})
+
+    def test_premisas_incompletas(self):
+        bc = BaseConocimiento(hechos=("A",))
+        bc.agregar_regla(("A", "B"), "C")
+        self.assertFalse(bc.preguntar("C"))
+
+    def test_encadenamiento_de_tres_saltos(self):
+        bc = BaseConocimiento(hechos=("P",))
+        bc.agregar_regla(("P",), "Q")
+        bc.agregar_regla(("Q",), "R")
+        self.assertTrue(bc.preguntar("R"))
+        self.assertFalse(bc.preguntar("S"))
+
+    def test_ciclo_sin_hechos(self):
+        bc = BaseConocimiento()
+        bc.agregar_regla(("A",), "B")
+        bc.agregar_regla(("B",), "A")
+        self.assertFalse(bc.preguntar("A"))
+
+    def test_ciclo_con_hecho(self):
+        bc = BaseConocimiento(hechos=("A",))
+        bc.agregar_regla(("A",), "B")
+        bc.agregar_regla(("B",), "A")
+        self.assertTrue(bc.preguntar("B"))
+
+    def test_preguntar_no_mutar_hechos(self):
+        bc = BaseConocimiento(hechos=("P",))
+        bc.agregar_regla(("P",), "Q")
+        self.assertTrue(bc.preguntar("Q"))
+        self.assertEqual(bc.hechos, {"P"})
+        self.assertTrue(bc.preguntar("Q"))
+
+    def test_regla_sin_premisas(self):
+        bc = BaseConocimiento(reglas=(ReglaHorn((), "Inicio"),))
+        self.assertTrue(bc.preguntar("Inicio"))
+
+    def test_premisas_duplicadas(self):
+        bc = BaseConocimiento(hechos=("A",))
+        bc.agregar_regla(("A", "A"), "B")
+        self.assertTrue(bc.preguntar("B"))
+
+    def test_explicar(self):
+        bc = BaseConocimiento(hechos=("A",))
+        bc.agregar_regla(("A",), "B")
+        correcto, pasos = bc.explicar("B")
+        self.assertTrue(correcto)
+        self.assertEqual(pasos, ["A â‡’ B"])
+
+    def test_validacion_de_simbolos(self):
+        with self.assertRaises(ValueError):
+            BaseConocimiento(hechos=("Jugador Arriba",))
+        with self.assertRaises(ValueError):
+            ReglaHorn(("P",), "")
+        with self.assertRaises(TypeError):
+            ReglaHorn("P", "Q")
+
+    def test_consulta_del_guardian_en_celda_adyacente(self):
+        reglas = (
+            ReglaHorn(("JugadorArriba", "CeldaArribaLibre"), "MoverArriba"),
+            ReglaHorn(("JugadorAbajo", "CeldaAbajoLibre"), "MoverAbajo"),
+        )
+        bc = crear_base_para_turno(reglas, ("JugadorArriba", "CeldaArribaLibre"))
+        self.assertTrue(bc.preguntar("MoverArriba"))
+        self.assertFalse(bc.preguntar("MoverAbajo"))
+
+    def test_no_hay_accion_sin_percepcion(self):
+        reglas = (ReglaHorn(("JugadorDerecha",), "MoverDerecha"),)
+        bc = crear_base_para_turno(reglas, ())
+        self.assertFalse(bc.preguntar("MoverDerecha"))
+
+    def test_no_hay_percepciones_obsoletas_de_turnos_anteriores(self):
+        regla = ReglaHorn(("JugadorDerecha",), "MoverDerecha")
+        primero = crear_base_para_turno((regla,), ("JugadorDerecha",))
+        segundo = crear_base_para_turno((regla,), ())
+        self.assertTrue(primero.preguntar("MoverDerecha"))
+        self.assertFalse(segundo.preguntar("MoverDerecha"))
+
+    def test_reglas_con_misma_conclusion(self):
+        bc = BaseConocimiento(hechos=("B",))
+        bc.agregar_regla(("A",), "Mover")
+        bc.agregar_regla(("B",), "Mover")
+        self.assertTrue(bc.preguntar("Mover"))
+
+    def test_sin_reglas_solo_hechos(self):
+        bc = BaseConocimiento(hechos=("A",))
+        self.assertTrue(bc.preguntar("A"))
+        self.assertFalse(bc.preguntar("B"))
+
+    def test_regla_repetida_no_se_agrega_dos_veces(self):
+        regla = ReglaHorn(("A",), "B")
+        bc = BaseConocimiento(reglas=(regla, regla), hechos=("A",))
+        self.assertEqual(len(bc.reglas), 1)
+        self.assertTrue(bc.preguntar("B"))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+
+========================================
+ARCHIVO: pruebas\test_nivel1_astar.py
+========================================
+import unittest
+
+from agentes.nivel1_astar import AgenteAStar
+from nucleo.agente_base import AgenteBase
+from nucleo.estado import EstadoJuego, aplicar_movimiento, movimientos_validos
+from nucleo.mapa import cargar_laberinto_desde_archivo, cargar_laberinto_desde_texto
+
+# Mapa donde el jugador (1, 1) queda encerrado: no existe ruta hacia Ã©l.
+MAPA_ENCERRADO = """
+.........E
+........G.
+..........
+..........
+..........
+..........
+..........
+..........
+#.........
+P#........
+"""
+
+
+class TestAgenteAStar(unittest.TestCase):
+    def setUp(self) -> None:
+        self.lab = cargar_laberinto_desde_archivo("mapas/nivel1.txt", nombre="Nivel 1")
+        self.agente = AgenteAStar()
+
+    def _estado_agente(self, lab, jugador, agente) -> EstadoJuego:
+        return EstadoJuego(lab, pos_jugador=jugador, pos_agente=agente, turno="AGENTE")
+
+    def test_cumple_el_contrato(self) -> None:
+        self.assertIsInstance(self.agente, AgenteBase)
+        estado = self._estado_agente(self.lab, self.lab.inicio_jugador, self.lab.inicio_agente)
+        accion = self.agente.elegir_movimiento(estado)
+        self.assertIn(accion, movimientos_validos(estado, actor="AGENTE"))
+
+    def test_ruta_optima_nivel_1(self) -> None:
+        # Jugador quieto en (1, 1): el agente llega en tantos turnos como pasos tiene la ruta Ã³ptima.
+        pos_agente = self.lab.inicio_agente  # (8, 10)
+        pasos = 0
+        while pos_agente != (1, 1) and pasos < 60:
+            estado = self._estado_agente(self.lab, (1, 1), pos_agente)
+            accion = self.agente.elegir_movimiento(estado)
+            self.assertIn(accion, movimientos_validos(estado, actor="AGENTE"))
+            pos_agente = aplicar_movimiento(estado, accion).pos_agente
+            pasos += 1
+        self.assertEqual(pos_agente, (1, 1))
+        self.assertEqual(pasos, 16)  # distancia Manhattan = 16 y el camino no necesita rodeos
+
+    def test_ultima_ruta_y_estadisticas(self) -> None:
+        estado = self._estado_agente(self.lab, self.lab.inicio_jugador, self.lab.inicio_agente)
+        self.agente.elegir_movimiento(estado)
+        self.assertEqual(self.agente.ultima_ruta[0], self.lab.inicio_agente)
+        self.assertEqual(self.agente.ultima_ruta[-1], self.lab.inicio_jugador)
+        self.assertGreater(self.agente.obtener_estadisticas()["nodos_explorados"], 0)
+        self.agente.reiniciar()
+        self.assertEqual(self.agente.ultima_ruta, [])
+
+    def test_sin_ruta_devuelve_movimiento_valido(self) -> None:
+        lab = cargar_laberinto_desde_texto(MAPA_ENCERRADO, "Encerrado")
+        estado = self._estado_agente(lab, (1, 1), lab.inicio_agente)
+        accion = self.agente.elegir_movimiento(estado)
+        self.assertIn(accion, movimientos_validos(estado, actor="AGENTE"))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+
+========================================
+ARCHIVO: pruebas\test_nivel3_guardian.py
+========================================
+import unittest
+from pathlib import Path
+
+from agentes.nivel3_guardian import AgenteGuardian
+from agentes.motor_logico import BaseConocimiento
+from nucleo.estado import EstadoJuego, aplicar_movimiento, es_captura, movimientos_validos
+from nucleo.mapa import cargar_laberinto_desde_archivo
+from nucleo.motor import MotorJuego, ResultadoNivel
+
+RUTA_MAPA = Path(__file__).resolve().parents[1] / "mapas" / "nivel3.txt"
+
+
+class TestGuardian(unittest.TestCase):
+    def setUp(self):
+        self.lab = cargar_laberinto_desde_archivo(RUTA_MAPA)
+        self.agente = AgenteGuardian()
+
+    def estado(self, jugador, guardian=(8, 9), turno=1):
+        return EstadoJuego(self.lab, jugador, guardian, "AGENTE", turno)
+
+    def test_patrulla_completa(self):
+        posiciones = [(8, 9), (9, 9), (9, 8), (8, 8), (8, 9)]
+        acciones = ["DERECHA", "ABAJO", "IZQUIERDA", "ARRIBA"]
+        for i, esperada in enumerate(acciones):
+            estado = self.estado((1, 1), posiciones[i], i + 1)
+            accion = self.agente.elegir_movimiento(estado)
+            self.assertEqual(accion, esperada)
+            self.assertIn(accion, movimientos_validos(estado))
+            self.assertEqual(aplicar_movimiento(estado, accion).pos_agente, posiciones[i + 1])
+            self.assertEqual(self.agente.obtener_estadisticas()["modo"], "PATRULLA")
+
+    def test_captura_en_cuatro_direcciones(self):
+        casos = [((9, 10), "ARRIBA"), ((9, 8), "ABAJO"),
+                 ((8, 9), "IZQUIERDA"), ((10, 9), "DERECHA")]
+        for jugador, esperada in casos:
+            with self.subTest(direccion=esperada):
+                estado = self.estado(jugador, (9, 9))
+                accion = self.agente.elegir_movimiento(estado)
+                self.assertEqual(accion, esperada)
+                self.assertTrue(es_captura(aplicar_movimiento(estado, accion)))
+                stats = self.agente.obtener_estadisticas()
+                self.assertEqual(stats["modo"], "INFERENCIA")
+                self.assertEqual(stats["inferencia"], self.agente.REGLAS[esperada][1])
+
+    def test_diagonal_no_es_percepcion(self):
+        estado = self.estado((7, 8))
+        self.assertEqual(self.agente.elegir_movimiento(estado), "DERECHA")
+        self.assertEqual(self.agente.obtener_estadisticas()["percepciones"], [])
+
+    def test_percepciones_no_se_acumulan(self):
+        self.agente.elegir_movimiento(self.estado((8, 10)))
+        self.assertEqual(self.agente.obtener_estadisticas()["inferencia"], "MoverArriba")
+        self.agente.elegir_movimiento(self.estado((1, 1), turno=2))
+        self.assertEqual(self.agente.obtener_estadisticas()["modo"], "PATRULLA")
+        self.assertIsNone(self.agente.obtener_estadisticas()["inferencia"])
+        self.assertIn("JugadorArriba_0", self.agente.bc.hechos)
+        self.assertTrue(self.agente.bc.preguntar("MoverArriba_0"))
+        self.assertFalse(self.agente.bc.preguntar("MoverArriba_1"))
+        self.assertTrue(self.agente.bc.preguntar("MoverDerecha_1"))
+
+    def test_reinicio(self):
+        self.agente.elegir_movimiento(self.estado((1, 1)))
+        self.agente.reiniciar()
+        self.assertEqual(self.agente.obtener_estadisticas(), {})
+        self.assertEqual(self.agente.t, 0)
+        self.assertEqual(self.agente.bc.hechos, set())
+        self.assertEqual(self.agente.bc.reglas, [])
+        self.assertEqual(self.agente.elegir_movimiento(self.estado((1, 1))), "DERECHA")
+
+    def test_decision_consulta_motor_logico(self):
+        class BCRegistro(BaseConocimiento):
+            def __init__(self):
+                super().__init__()
+                self.consultas = []
+
+            def preguntar(self, objetivo):
+                self.consultas.append(objetivo)
+                return super().preguntar(objetivo)
+
+        instancias = []
+        def crear():
+            bc = BCRegistro()
+            instancias.append(bc)
+            return bc
+
+        agente = AgenteGuardian(fabrica_bc=crear)
+        self.assertEqual(agente.elegir_movimiento(self.estado((8, 10))), "ARRIBA")
+        self.assertIn("JugadorArriba_0", instancias[0].hechos)
+        self.assertIn("MoverArriba_0", instancias[0].consultas)
+        self.assertIn("AccionElegida_ARRIBA_0", instancias[0].hechos)
+
+    def test_bc_persistente_y_contador(self):
+        bc = self.agente.bc
+        self.assertEqual(self.agente.t, 0)
+        self.agente.elegir_movimiento(self.estado((1, 1)))
+        self.assertEqual(self.agente.t, 1)
+        self.agente.elegir_movimiento(self.estado((1, 1), (9, 9), 2))
+        self.assertEqual(self.agente.t, 2)
+        self.assertIs(self.agente.bc, bc)
+        self.assertIn("SinJugadorAdyacente_0", bc.hechos)
+        self.assertIn("SinJugadorAdyacente_1", bc.hechos)
+        self.assertIn("AccionElegida_DERECHA_0", bc.hechos)
+        self.assertIn("AccionElegida_ABAJO_1", bc.hechos)
+        self.assertTrue(bc.preguntar("MoverDerecha_0"))
+        self.assertTrue(bc.preguntar("MoverAbajo_1"))
+        self.assertFalse(bc.preguntar("MoverDerecha_1"))
+
+    def test_patrulla_consulta_motor_logico(self):
+        class BCRegistro(BaseConocimiento):
+            def __init__(self):
+                super().__init__()
+                self.consultas = []
+
+            def preguntar(self, objetivo):
+                self.consultas.append(objetivo)
+                return super().preguntar(objetivo)
+
+        agente = AgenteGuardian(fabrica_bc=BCRegistro)
+        self.assertEqual(agente.elegir_movimiento(self.estado((1, 1))), "DERECHA")
+        self.assertIn("MoverDerecha_0", agente.bc.consultas)
+        self.assertIn("AccionElegida_DERECHA_0", agente.bc.hechos)
+        self.assertEqual(agente.obtener_estadisticas()["modo"], "PATRULLA")
+
+    def test_captura_prevalece_sobre_patrulla(self):
+        self.assertEqual(self.agente.elegir_movimiento(self.estado((8, 10))), "ARRIBA")
+        self.assertTrue(self.agente.bc.preguntar("MoverArriba_0"))
+        self.assertFalse(self.agente.bc.preguntar("MoverDerecha_0"))
+
+    def test_integracion_motor(self):
+        motor = MotorJuego([(self.lab, self.agente)])
+        self.assertEqual(motor.ejecutar_turno_humano("DERECHA"), ResultadoNivel.EN_CURSO)
+        accion, resultado = motor.ejecutar_turno_agente()
+        self.assertEqual((accion, resultado), ("DERECHA", ResultadoNivel.EN_CURSO))
+        self.assertEqual(motor.estado.pos_agente, (9, 9))
+        self.assertEqual(motor.historial[-1].estadisticas_agente["modo"], "PATRULLA")
+
+    def test_captura_en_motor(self):
+        motor = MotorJuego([(self.lab, self.agente)])
+        motor.estado = EstadoJuego(self.lab, (9, 7), (9, 9), "HUMANO")
+        self.assertEqual(motor.ejecutar_turno_humano("ARRIBA"), ResultadoNivel.EN_CURSO)
+        self.assertEqual(motor.ejecutar_turno_agente(), ("ABAJO", ResultadoNivel.CAPTURA_AGENTE))
+
+    def test_partida_completa_desde_inicio(self):
+        # Secuencia de prueba del humano, no parte del algoritmo del guardiÃ¡n.
+        acciones = ["ARRIBA"] * 6 + ["DERECHA"] * 5 + ["ARRIBA"] + ["DERECHA"] * 2 + ["ARRIBA"] * 2 + ["DERECHA"] * 2
+        motor = MotorJuego([(self.lab, self.agente)])
+        for indice, accion in enumerate(acciones):
+            resultado = motor.ejecutar_turno_humano(accion)
+            if indice == len(acciones) - 1:
+                self.assertEqual(resultado, ResultadoNivel.VICTORIA_HUMANO)
+            else:
+                self.assertEqual(resultado, ResultadoNivel.EN_CURSO)
+                _, resultado_agente = motor.ejecutar_turno_agente()
+                self.assertEqual(resultado_agente, ResultadoNivel.EN_CURSO)
+        self.assertEqual(motor.estado.pos_jugador, (10, 10))
+
+    def test_escape_en_motor(self):
+        motor = MotorJuego([(self.lab, self.agente)])
+        motor.estado = EstadoJuego(self.lab, (9, 10), (8, 8), "HUMANO")
+        self.assertEqual(motor.ejecutar_turno_humano("DERECHA"), ResultadoNivel.VICTORIA_HUMANO)
+
+
+class TestMotorLogico(unittest.TestCase):
+    def test_ejemplo_diapositiva_64(self):
+        bc = BaseConocimiento()
+        for hecho in ("A", "B", "E"):
+            bc.decir(hecho)
+        bc.decir(("A", "B"), "C")
+        bc.decir(("C",), "D")
+        bc.decir(("B", "E"), "F")
+        bc.decir(("D", "F"), "G")
+        self.assertTrue(bc.preguntar("G"))
+        self.assertFalse(bc.preguntar("X"))
+
+    def test_premisas_incompletas(self):
+        bc = BaseConocimiento()
+        bc.decir(("A", "B"), "C")
+        bc.decir("A")
+        self.assertFalse(bc.preguntar("C"))
+        bc.decir("B")
+        self.assertTrue(bc.preguntar("C"))
+
+    def test_ciclo_y_duplicados(self):
+        bc = BaseConocimiento()
+        bc.decir(("A",), "B")
+        bc.decir(("B",), "A")
+        bc.decir(("A",), "B")
+        self.assertFalse(bc.preguntar("B"))
+        bc.decir("A")
+        self.assertTrue(bc.preguntar("B"))
+        self.assertFalse(bc.preguntar("C"))
+
+    def test_clausula_sin_premisas(self):
+        bc = BaseConocimiento()
+        bc.decir((), "A")
+        bc.decir(("A",), "B")
+        self.assertTrue(bc.preguntar("B"))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+
