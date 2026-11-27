@@ -5,7 +5,7 @@ del MotorJuego y envía las acciones del jugador. Sirve para los 3 niveles.
 
 El tablero se dibuja por código y admite sprites PNG opcionales:
   #  muro de piedra       .  piso de losas       E  puerta con luz
-  P  Gandalf (mago)                               G  Balrog (agente)
+  P  Gandalf (mago)                               G  Troll (agente)
 Los sprites son visuales: P/G siguen indicando posiciones del motor.
 Los finales de derrota y victoria usan escenas pixel art opcionales.
 El lienzo se adapta a la ventana; las letras se rasterizan a tamaño real
@@ -42,6 +42,12 @@ PERGAMINO = (226, 208, 166)
 ROJO_OJOS = (255, 40, 30)
 AZUL_CAPA = (96, 130, 182)
 
+ORO_BRILLO = (255, 210, 90)
+PIEDRA_BTN = (40, 34, 30)
+PIEDRA_BTN2 = (26, 22, 18)
+SOMBRA_BTN = (10, 8, 6)
+ROJO_BTN = (120, 42, 30)
+
 OSCURIDAD = 80  # 0 = sin oscuridad, 255 = negro total
 
 
@@ -62,6 +68,80 @@ def _brillo(radio, color):
         k = (1 - i / radio) ** 1.6
         pygame.draw.circle(s, tuple(int(c * k) for c in color), (radio, radio), i)
     return s
+
+
+class GestorMusica:
+    """Audio ambiental independiente del motor del juego.
+
+    Coloca inicio, partida, derrota y victoria en assets/musica/.
+    Admite .ogg, .mp3 o .wav y evita reiniciar la pista por fotograma.
+    Si no hay dispositivo de audio o faltan archivos, se juega en silencio.
+    """
+
+    CARPETA = Path(__file__).resolve().parent.parent / "assets" / "musica"
+
+    def __init__(self, volumen=0.45):
+        self.disponible = False
+        self.actual = None
+        self.silenciado = False
+        self.volumen = volumen
+        try:
+            if pygame.mixer.get_init() is None:
+                pygame.mixer.init()
+            pygame.mixer.music.set_volume(volumen)
+            self.disponible = True
+        except pygame.error as error:
+            print(f"[Música] Audio no disponible; se continúa sin música: {error}")
+
+    def _archivo(self, nombre):
+        # Si agregas una pista en OGG o MP3, tendrá preferencia sobre
+        # los audios WAV de ejemplo incluidos con el proyecto.
+        for extension in (".ogg", ".mp3", ".wav"):
+            archivo = self.CARPETA / f"{nombre}{extension}"
+            if archivo.is_file():
+                return archivo
+        return None
+
+    def reproducir(self, escena):
+        """Cambia la música solo cuando cambia la escena del videojuego."""
+        if not self.disponible or self.actual == escena:
+            return
+        self.actual = escena
+        archivo = self._archivo(escena)
+        try:
+            pygame.mixer.music.stop()
+            if archivo is None:
+                print(f"[Música] Falta pista opcional: assets/musica/{escena}.ogg/.mp3/.wav")
+                return
+            pygame.mixer.music.load(str(archivo))
+            pygame.mixer.music.set_volume(0.0 if self.silenciado else self.volumen)
+            # Intro y partida se repiten; finales se escuchan una vez.
+            repeticiones = -1 if escena in ("inicio", "partida") else 0
+            pygame.mixer.music.play(loops=repeticiones, fade_ms=350)
+        except (OSError, pygame.error) as error:
+            print(f"[Música] No se pudo reproducir {archivo}: {error}")
+
+    def alternar_silencio(self):
+        """M activa o desactiva la música sin perder la escena actual."""
+        self.silenciado = not self.silenciado
+        if self.disponible:
+            pygame.mixer.music.set_volume(0.0 if self.silenciado else self.volumen)
+        return self.silenciado
+
+    def actualizar(self, motor, en_menu):
+        if en_menu:
+            escena = "inicio"
+        else:
+            resultado = motor.evaluar_resultado()
+            if resultado == ResultadoNivel.CAPTURA_AGENTE:
+                escena = "derrota"
+            elif (resultado == ResultadoNivel.VICTORIA_HUMANO
+                  and motor.indice_nivel + 1 >= motor.total_niveles):
+                escena = "victoria"
+            else:
+                # Durante el juego y las transiciones de nivel 1 y 2.
+                escena = "partida"
+        self.reproducir(escena)
 
 
 class Interfaz:
@@ -89,9 +169,12 @@ class Interfaz:
         self.luz_activa = True
         self.sprite_jugador = self._cargar_sprite_jugador()
         self.sprite_agente = self._cargar_sprite_agente()
+        self.escena_inicio = self._cargar_escena_final("inicio.png")
         self.escena_derrota = self._cargar_escena_final("derrota.png")
         self.escena_victoria = self._cargar_escena_final("victoria.png")
         self._mostrar_final = False
+        self.seleccion_menu = 0  # 0: Iniciar, 1: Salir
+        self.menu_usa_raton = False  # permite seleccionar con teclado aunque el mouse esté quieto
         # El juego sigue usando un lienzo lógico para el tablero, pero el texto
         # se pinta después directamente sobre la ventana a su resolución real.
         self._textos_pendientes = []
@@ -257,7 +340,9 @@ class Interfaz:
         p.fill(FONDO)
         perdio = resultado == ResultadoNivel.CAPTURA_AGENTE
         final_juego = (motor.indice_nivel + 1) == motor.total_niveles
-        escena = self.escena_derrota if perdio else self.escena_victoria
+        # Únicamente derrota y victoria FINAL usan ilustraciones.
+        # Las victorias intermedias se dibujan sobre el tablero, en dibujar().
+        escena = self.escena_derrota if perdio else self.escena_victoria if final_juego else None
 
         if escena is not None:
             # Fondo tenue para rellenar las franjas si cambia la proporción.
@@ -268,10 +353,10 @@ class Interfaz:
             area_arte = pygame.Rect(15, 18, w - 30, max(1, h - 144))
             self._dibujar_arte_escena(p, escena, area_arte, recortar=False)
         else:
-            # Respaldo en caso de que no se hayan copiado los PNG.
+            # Respaldo cuando faltan los PNG de los finales definitivos.
             pygame.draw.rect(p, (37, 28, 23),
                              pygame.Rect(15, 18, w - 30, h - 144))
-            texto = "GAME OVER" if perdio else "¡NO PASARÁS!"
+            texto = "GAME OVER" if perdio else "¡GANASTE!"
             self._texto(self.f_titulo, texto, ORO,
                         centro=(w // 2, h // 2 - 60))
 
@@ -295,6 +380,150 @@ class Interfaz:
                     centro=(w // 2, h - 57))
         self._texto(self.f_peq, "LAS MINAS DE MORIA", ORO_OSC,
                     centro=(w // 2, h - 29))
+
+    def _superacion_intermedia(self):
+        """Franja clásica sobre el laberinto para niveles 1 y 2.
+
+        Conserva el tablero y la bitácora visibles como en la interfaz
+        original. El texto se pinta a resolución real en _presentar_escalado().
+        """
+        p = self.pantalla
+        cy = TOP + CELDA * TAM // 2
+        velo = pygame.Surface((ANCHO, 150), pygame.SRCALPHA)
+        velo.fill((8, 6, 4, 215))
+        p.blit(velo, (0, cy - 75))
+        pygame.draw.line(p, ORO_OSC,
+                         (MARGEN_X, cy - 75), (ANCHO - MARGEN_X, cy - 75), 2)
+        pygame.draw.line(p, ORO_OSC,
+                         (MARGEN_X, cy + 75), (ANCHO - MARGEN_X, cy + 75), 2)
+        self._texto(self.f_titulo, "NIVEL SUPERADO", ORO,
+                    centro=(ANCHO // 2, cy - 18))
+        self._texto(self.f_texto, "ENTER: siguiente nivel", PERGAMINO,
+                    centro=(ANCHO // 2, cy + 30))
+
+    # ---- menú principal: solo Iniciar y Salir ------------------------
+    def _botones_menu(self):
+        """Rectángulos en coordenadas lógicas; válidos en ambos diseños."""
+        w, h = self.ancho_logico, self.alto_logico
+        ancho = min(245, max(145, int(w * 0.33)))
+        alto = 58
+        espacio = 24
+        inicio = (w - (2 * ancho + espacio)) // 2
+        y = h - 93
+        return (pygame.Rect(inicio, y, ancho, alto),
+                pygame.Rect(inicio + ancho + espacio, y, ancho, alto))
+
+    def _posicion_logica(self, posicion):
+        """Transforma un clic de la ventana redimensionada al lienzo lógico."""
+        ventana = pygame.display.get_surface()
+        ancho, alto = ventana.get_size()
+        factor = min(ancho / self.ancho_logico, alto / self.alto_logico)
+        if factor <= 0:
+            return None
+        desplazamiento_x = (ancho - self.ancho_logico * factor) / 2
+        desplazamiento_y = (alto - self.alto_logico * factor) / 2
+        lx = (posicion[0] - desplazamiento_x) / factor
+        ly = (posicion[1] - desplazamiento_y) / factor
+        if not (0 <= lx < self.ancho_logico and 0 <= ly < self.alto_logico):
+            return None
+        return (lx, ly)
+
+    def opcion_menu_en(self, posicion):
+        """Devuelve 0 para Iniciar, 1 para Salir o None fuera de los botones."""
+        punto = self._posicion_logica(posicion)
+        if punto is None:
+            return None
+        for indice, rect in enumerate(self._botones_menu()):
+            if rect.collidepoint(punto):
+                return indice
+        return None
+
+    def _dibujar_boton_moria(self, rect, texto, activo=False, hover=False):
+        """Botón de piedra grabada y oro, sin imágenes ni controles externos."""
+        p = self.pantalla
+        iluminado = activo or hover
+        borde = ORO_BRILLO if iluminado else ORO_OSC
+
+        # Aura suave, debajo del botón y de sus bordes (no tapa el texto).
+        if iluminado:
+            for margen, alfa in ((12, 23), (7, 40), (3, 54)):
+                halo = pygame.Surface((rect.width + margen * 2,
+                                       rect.height + margen * 2), pygame.SRCALPHA)
+                pygame.draw.rect(halo, (255, 184, 66, alfa), halo.get_rect(),
+                                 border_radius=13)
+                p.blit(halo, (rect.x - margen, rect.y - margen))
+
+        # Relieve de roca, placa interior y líneas de luz.
+        pygame.draw.rect(p, SOMBRA_BTN, rect.move(3, 5), border_radius=11)
+        pygame.draw.rect(p, (62, 49, 38) if iluminado else PIEDRA_BTN,
+                         rect, border_radius=11)
+        interior = rect.inflate(-8, -8)
+        pygame.draw.rect(p, (48, 37, 29) if iluminado else PIEDRA_BTN2,
+                         interior, border_radius=7)
+        pygame.draw.line(p, (115, 89, 58) if iluminado else (76, 61, 43),
+                         (rect.left + 14, rect.top + 10),
+                         (rect.right - 14, rect.top + 10), 2)
+        pygame.draw.line(p, (19, 15, 12),
+                         (rect.left + 14, rect.bottom - 11),
+                         (rect.right - 14, rect.bottom - 11), 2)
+        pygame.draw.rect(p, borde, rect, 3 if iluminado else 2,
+                         border_radius=11)
+        pygame.draw.rect(p, ORO_OSC, interior, 1, border_radius=7)
+
+        # Grabados en las cuatro esquinas de la placa.
+        for lado in (-1, 1):
+            ax = rect.centerx + lado * (rect.width // 2 - 14)
+            pygame.draw.line(p, borde, (ax, rect.top + 10),
+                             (ax - lado * 11, rect.top + 10), 2)
+            pygame.draw.line(p, borde, (ax, rect.bottom - 11),
+                             (ax - lado * 11, rect.bottom - 11), 2)
+
+        # Se usa _texto para mantener nítidas las letras al redimensionar.
+        self._texto(self.f_texto, texto, (0, 0, 0),
+                    centro=(rect.centerx + 1, rect.centery + 2))
+        self._texto(self.f_texto, texto,
+                    (255, 239, 185) if iluminado else PERGAMINO,
+                    centro=(rect.centerx, rect.centery))
+
+    def dibujar_inicio(self):
+        """Menú de Moria: exactamente dos opciones, Iniciar y Salir."""
+        self._actualizar_disposicion()
+        self._textos_pendientes.clear()
+        self._mostrar_final = True  # no dibujar cuadrícula sobre el menú
+        p = self.pantalla
+        w, h = self.ancho_logico, self.alto_logico
+        p.fill(FONDO)
+
+        if self.escena_inicio is not None:
+            # Se conserva el PNG original y su proporción.
+            tenue = pygame.transform.scale(self.escena_inicio, (w, h))
+            tenue.set_alpha(55)
+            p.blit(tenue, (0, 0))
+            area = pygame.Rect(14, 12, w - 28, h - 128)
+            self._dibujar_arte_escena(p, self.escena_inicio, area, recortar=False)
+        else:
+            self._texto(self.f_titulo, "LAS MINAS DE MORIA", ORO,
+                        centro=(w // 2, h // 2 - 110))
+
+        botones = self._botones_menu()
+        rect_total = botones[0].union(botones[1]).inflate(29, 24)
+
+        # Panel de piedra semitransparente para separar opciones de la imagen.
+        panel = pygame.Surface(rect_total.size, pygame.SRCALPHA)
+        pygame.draw.rect(panel, (12, 9, 7, 225), panel.get_rect(),
+                         border_radius=14)
+        pygame.draw.rect(panel, (158, 119, 59, 185), panel.get_rect(),
+                         2, border_radius=14)
+        p.blit(panel, rect_total.topleft)
+
+        bajo_raton = self.opcion_menu_en(pygame.mouse.get_pos())
+        for i, (rect, etiqueta) in enumerate(zip(botones, ("INICIAR", "SALIR"))):
+            hover = self.menu_usa_raton and bajo_raton == i
+            self._dibujar_boton_moria(rect, etiqueta,
+                                     activo=(i == self.seleccion_menu),
+                                     hover=hover)
+
+        self._presentar_escalado()
 
     # ---- personajes --------------------------------------------------
     @staticmethod
@@ -321,8 +550,11 @@ class Interfaz:
 
     @staticmethod
     def _cargar_sprite_agente():
-        """Balrog opcional; si falta el recurso se conserva el trasgo original."""
-        ruta = Path(__file__).resolve().parent.parent / "assets" / "personajes" / "balrog.png"
+        """Sprite del Troll (opcional); también admite el nombre antiguo del PNG."""
+        carpeta = Path(__file__).resolve().parent.parent / "assets" / "personajes"
+        ruta = carpeta / "troll.png"
+        if not ruta.is_file():
+            ruta = carpeta / "balrog.png"
         try:
             sprite = pygame.image.load(str(ruta)).convert_alpha()
             return pygame.transform.smoothscale(sprite, (58, 58))
@@ -397,8 +629,13 @@ class Interfaz:
         estado = motor.estado
         lab = estado.laberinto
         resultado = motor.evaluar_resultado()
-        self._mostrar_final = resultado != ResultadoNivel.EN_CURSO
+        # Los niveles 1 y 2 conservan el tablero detrás del aviso clásico.
+        victoria_intermedia = (resultado == ResultadoNivel.VICTORIA_HUMANO
+                               and motor.indice_nivel + 1 < motor.total_niveles)
+        self._mostrar_final = (resultado != ResultadoNivel.EN_CURSO
+                              and not victoria_intermedia)
         if self._mostrar_final:
+            # Imágenes reservadas a GAME OVER y al final del nivel 3.
             self._pantalla_cinematografica(motor, resultado)
             self._presentar_escalado()
             return
@@ -456,7 +693,7 @@ class Interfaz:
                 p.blit(brillo, brillo.get_rect(center=(cx, cy)), special_flags=pygame.BLEND_RGB_ADD)
             p.set_clip(None)
             # Conservamos los ojos del dibujo clásico solo en modo de respaldo:
-            # no se superponen sobre la cara del sprite del Balrog.
+            # no se superponen sobre la cara del sprite del Troll.
             if self.sprite_agente is None:
                 self._trasgo(p, ac, solo_ojos=True)
             if self.sprite_jugador is None:
@@ -473,6 +710,8 @@ class Interfaz:
         self._texto(self.f_peq, "E", (60, 40, 10), centro=(er.centerx, er.bottom - 16))
 
         self._hud(motor, mensaje)
+        if victoria_intermedia:
+            self._superacion_intermedia()
         self._presentar_escalado()
 
     def _presentar_escalado(self):
@@ -486,7 +725,9 @@ class Interfaz:
         x, y = (w - ancho) // 2, (h - alto) // 2
         self.ventana.fill(FONDO)
         imagen = (self.pantalla if (ancho, alto) == (self.ancho_logico, self.alto_logico)
-                  else pygame.transform.smoothscale(self.pantalla, (ancho, alto)))
+                  else (pygame.transform.scale(self.pantalla, (ancho, alto))
+                         if self._mostrar_final
+                         else pygame.transform.smoothscale(self.pantalla, (ancho, alto))))
         self.ventana.blit(imagen, (x, y))
 
         # Los bordes de las celdas se dibujan a resolución física, incluso al
@@ -550,8 +791,8 @@ class Interfaz:
         if len(linea) > 68:
             linea = linea[:67] + "..."
         self._texto(self.f_peq, linea, ORO, izq=(x, y0 + 64))
-        self._texto(self.f_peq, "P Gandalf   G Balrog (agente)   E salida   # muro", ORO_OSC, izq=(x, y0 + 86))
-        self._texto(self.f_peq, "WASD/flechas mover  H ruta  L luz  R reintentar  Esc salir", ORO_OSC,
+        self._texto(self.f_peq, "P Gandalf   G Troll (agente)   E salida   # muro", ORO_OSC, izq=(x, y0 + 86))
+        self._texto(self.f_peq, "WASD/flechas: mover  H: ruta  L: luz  M: música  R: reiniciar  Esc: salir", ORO_OSC,
                     izq=(x, y0 + 106))
 
     def _texto_envuelto(self, texto, x, y, ancho, max_lineas=2, color=PERGAMINO):
@@ -603,7 +844,7 @@ class Interfaz:
 
         self._texto(self.f_peq, "GANDALF (P)", ORO, izq=(x, 251))
         self._texto(self.f_texto, str(estado.pos_jugador), PERGAMINO, izq=(x, 275))
-        self._texto(self.f_peq, "BALROG (G)", ORO, izq=(x + 171, 251))
+        self._texto(self.f_peq, "TROLL (G)", ORO, izq=(x + 171, 251))
         self._texto(self.f_texto, str(estado.pos_agente), PERGAMINO, izq=(x + 171, 275))
         pygame.draw.line(p, (65, 58, 45), (x, 298), (x + ancho, 298), 1)
 
@@ -627,9 +868,9 @@ class Interfaz:
 
         self._texto(self.f_peq, "CONTROLES", ORO, izq=(x, 540))
         self._texto(self.f_peq, "WASD / flechas: moverse", PERGAMINO, izq=(x, 563))
-        self._texto(self.f_peq, "H: ruta     L: luz", PERGAMINO, izq=(x, 586))
+        self._texto(self.f_peq, "H: ruta   L: luz   M: música", PERGAMINO, izq=(x, 586))
         self._texto(self.f_peq, "R: reintentar   Esc: salir", PERGAMINO, izq=(x, 609))
-        self._texto(self.f_peq, "P Gandalf · G Balrog · E salida", ORO_OSC,
+        self._texto(self.f_peq, "P Gandalf · G Troll · E salida", ORO_OSC,
                     izq=(x, 640))
 
 
@@ -648,28 +889,75 @@ TECLAS = {
 
 
 def ejecutar_en_pygame(motor: MotorJuego) -> None:
-    """Equivalente gráfico de interfaz.consola_basica.ejecutar_en_consola."""
+    """Menú principal y tres niveles conectados al motor original del juego."""
     interfaz = Interfaz()
+    musica = GestorMusica()
     reloj = pygame.time.Clock()
+    en_menu = True
     mostrar_ruta = False
     mensaje = "Tu turno."
-    mover_agente_en = None  # instante (ms) en que el agente ejecuta su turno
+    mover_agente_en = None  # instante (ms) para ejecutar el turno del agente
+
+    def iniciar_partida():
+        nonlocal en_menu, mostrar_ruta, mensaje, mover_agente_en
+        # Iniciar siempre comienza desde el primer nivel.
+        motor.iniciar_nivel(0)
+        en_menu = False
+        mostrar_ruta = False
+        mover_agente_en = None
+        mensaje = "Tu turno."
 
     while True:
+        # Mantener las coordenadas de los botones correctas tras redimensionar.
+        interfaz._actualizar_disposicion()
         for evento in pygame.event.get():
             if evento.type == pygame.QUIT:
                 pygame.quit()
                 return
             if evento.type == pygame.VIDEORESIZE:
-                # Los movimientos no dependen del tamaño de la ventana.
-                # En el siguiente dibujo se vuelve a encajar el lienzo.
-                continue
-            if evento.type != pygame.KEYDOWN:
                 continue
 
+            if en_menu:
+                if evento.type == pygame.MOUSEMOTION:
+                    opcion = interfaz.opcion_menu_en(evento.pos)
+                    if opcion is not None:
+                        interfaz.seleccion_menu = opcion
+                        interfaz.menu_usa_raton = True
+                elif evento.type == pygame.MOUSEBUTTONDOWN and evento.button == 1:
+                    opcion = interfaz.opcion_menu_en(evento.pos)
+                    if opcion == 0:
+                        iniciar_partida()
+                    elif opcion == 1:
+                        pygame.quit()
+                        return
+                elif evento.type == pygame.KEYDOWN:
+                    if evento.key == pygame.K_m:
+                        musica.alternar_silencio()
+                        continue
+                    if evento.key == pygame.K_ESCAPE:
+                        pygame.quit()
+                        return
+                    if evento.key in (pygame.K_UP, pygame.K_DOWN,
+                                      pygame.K_LEFT, pygame.K_RIGHT, pygame.K_TAB):
+                        interfaz.seleccion_menu = 1 - interfaz.seleccion_menu
+                        interfaz.menu_usa_raton = False
+                    elif evento.key in (pygame.K_RETURN, pygame.K_KP_ENTER,
+                                        pygame.K_SPACE):
+                        if interfaz.seleccion_menu == 0:
+                            iniciar_partida()
+                        else:
+                            pygame.quit()
+                            return
+                continue
+
+            # Controles de juego (sin cambios de reglas ni algoritmos).
+            if evento.type != pygame.KEYDOWN:
+                continue
             if evento.key == pygame.K_ESCAPE:
                 pygame.quit()
                 return
+            elif evento.key == pygame.K_m:
+                musica.alternar_silencio()
             elif evento.key == pygame.K_h:
                 mostrar_ruta = not mostrar_ruta
             elif evento.key == pygame.K_l:
@@ -680,6 +968,7 @@ def ejecutar_en_pygame(motor: MotorJuego) -> None:
                 mensaje = "Nivel reiniciado. Tu turno."
             elif evento.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
                 if motor.evaluar_resultado() == ResultadoNivel.VICTORIA_HUMANO and motor.avanzar_nivel():
+                    mover_agente_en = None
                     mensaje = "Nuevo nivel. Tu turno."
             elif evento.key in TECLAS:
                 en_curso = motor.evaluar_resultado() == ResultadoNivel.EN_CURSO
@@ -694,11 +983,15 @@ def ejecutar_en_pygame(motor: MotorJuego) -> None:
                 if resultado == ResultadoNivel.EN_CURSO:
                     mover_agente_en = pygame.time.get_ticks() + RETARDO_AGENTE_MS
 
-        # turno del agente después de la pausa
-        if mover_agente_en is not None and pygame.time.get_ticks() >= mover_agente_en:
-            accion, resultado = motor.ejecutar_turno_agente()
-            mensaje = f"Agente -> {accion} {motor.estado.pos_agente}"
-            mover_agente_en = None
-
-        interfaz.dibujar(motor, mensaje, mostrar_ruta)
+        # La música cambia en las transiciones, sin reiniciar cada fotograma.
+        musica.actualizar(motor, en_menu)
+        if en_menu:
+            interfaz.dibujar_inicio()
+        else:
+            # En el menú el motor nunca recibe turnos.
+            if mover_agente_en is not None and pygame.time.get_ticks() >= mover_agente_en:
+                accion, resultado = motor.ejecutar_turno_agente()
+                mensaje = f"Agente -> {accion} {motor.estado.pos_agente}"
+                mover_agente_en = None
+            interfaz.dibujar(motor, mensaje, mostrar_ruta)
         reloj.tick(30)
